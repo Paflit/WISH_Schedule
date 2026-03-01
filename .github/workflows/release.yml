@@ -1,0 +1,48 @@
+name: Build & Release (Windows)
+
+on:
+  push:
+    tags:
+      - "beta-gitv-0.01"  
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build with PyInstaller (spec)
+        run: |
+          pyinstaller --noconfirm --clean PracticWISH.spec
+
+      - name: Prepare portable folder
+        run: |
+          mkdir release_out
+          xcopy /E /I /Y dist\PracticWISH release_out\PracticWISH
+          xcopy /Y release\PracticWISH.bat release_out\PracticWISH\
+          xcopy /Y release\CreateDesktopShortcut.ps1 release_out\PracticWISH\
+          if exist Icon.ico (mkdir release_out\PracticWISH\assets & xcopy /Y assets\app.ico release_out\PracticWISH\assets\)
+
+      - name: Zip portable build
+        run: |
+          powershell -Command "Compress-Archive -Path release_out\PracticWISH -DestinationPath PracticWISH-win64.zip -Force"
+
+      - name: Create GitHub Release & Upload Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PracticWISH-win64.zip
