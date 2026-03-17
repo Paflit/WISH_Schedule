@@ -3,22 +3,67 @@ from __future__ import annotations
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QTableWidget, QTableWidgetItem, QMessageBox,
-    QDialog, QFormLayout, QLineEdit, QSpinBox, QComboBox, QDialogButtonBox
+    QDialog, QFormLayout, QLineEdit, QSpinBox,
+    QDialogButtonBox, QListWidget, QListWidgetItem
 )
+from PyQt6.QtCore import Qt
+
+
+# Какие типы поддерживаем (можешь расширять)
+ROOM_TYPES = [
+    ("lecture", "Лекционная"),
+    ("classroom", "Учебная"),
+    ("computer", "Компьютерный класс"),
+    ("lab", "Лаборатория"),
+]
+
+
+def types_to_csv(types: list[str]) -> str:
+    # сохраняем в БД как "lecture,classroom"
+    unique = []
+    for t in types:
+        t = t.strip()
+        if t and t not in unique:
+            unique.append(t)
+    return ",".join(unique)
+
+
+def csv_to_types(s: str | None) -> list[str]:
+    if not s:
+        return []
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def type_label(code: str) -> str:
+    for c, name in ROOM_TYPES:
+        if c == code:
+            return name
+    return code
+
+
+def type_labels_csv(csv: str | None) -> str:
+    types = csv_to_types(csv)
+    if not types:
+        return "—"
+    return ", ".join(type_label(t) for t in types)
 
 
 class RoomDialog(QDialog):
+    """
+    Диалог добавления/редактирования аудитории:
+    - номер
+    - мультивыбор типов
+    - вместимость
+    """
+
     def __init__(
         self,
         parent=None,
         *,
         title: str,
-        id_value: int | None = None,
         number_value: str = "",
-        type_value: str = "lecture",
+        types_csv_value: str = "classroom",
         capacity_value: int = 30,
-        building_value: str = "",
-        is_edit: bool = False,
     ):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -26,37 +71,28 @@ class RoomDialog(QDialog):
 
         layout = QFormLayout(self)
 
-        self.id_spin = QSpinBox()
-        self.id_spin.setRange(1, 10**9)
-        if id_value is not None:
-            self.id_spin.setValue(id_value)
-            if is_edit:
-                self.id_spin.setEnabled(False)
-
         self.number_edit = QLineEdit()
         self.number_edit.setText(number_value)
 
-        self.type_combo = QComboBox()
-        self.type_combo.addItem("Лекционная (lecture)", "lecture")
-        self.type_combo.addItem("Компьютерный класс (computer)", "computer")
-        self.type_combo.addItem("Лаборатория (lab)", "lab")
-        self.type_combo.addItem("Учебная (classroom)", "classroom")
-        idx = self.type_combo.findData(type_value)
-        if idx >= 0:
-            self.type_combo.setCurrentIndex(idx)
+        self.types_list = QListWidget()
+        self.types_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+
+        selected = set(csv_to_types(types_csv_value))
+
+        for code, name in ROOM_TYPES:
+            item = QListWidgetItem(f"{name} ({code})")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if code in selected else Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, code)
+            self.types_list.addItem(item)
 
         self.capacity_spin = QSpinBox()
         self.capacity_spin.setRange(1, 1000)
         self.capacity_spin.setValue(int(capacity_value) if capacity_value else 30)
 
-        self.building_edit = QLineEdit()
-        self.building_edit.setText(building_value or "")
-
-        layout.addRow("ID:", self.id_spin)
         layout.addRow("Номер аудитории:", self.number_edit)
-        layout.addRow("Тип:", self.type_combo)
+        layout.addRow("Типы аудитории:", self.types_list)
         layout.addRow("Вместимость:", self.capacity_spin)
-        layout.addRow("Корпус:", self.building_edit)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -66,14 +102,16 @@ class RoomDialog(QDialog):
         layout.addRow(buttons)
 
     def values(self):
-        b = self.building_edit.text().strip()
-        return (
-            self.id_spin.value(),
-            self.number_edit.text().strip(),
-            self.type_combo.currentData(),
-            self.capacity_spin.value(),
-            b or None,
-        )
+        number = self.number_edit.text().strip()
+        capacity = int(self.capacity_spin.value())
+
+        chosen = []
+        for i in range(self.types_list.count()):
+            item = self.types_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                chosen.append(str(item.data(Qt.ItemDataRole.UserRole)))
+
+        return number, chosen, capacity
 
 
 class RoomsPage(QWidget):
@@ -101,8 +139,8 @@ class RoomsPage(QWidget):
         layout.addLayout(btn_layout)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["ID", "Номер", "Тип", "Вместимость", "Корпус"])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["ID", "Номер", "Типы", "Вместимость"])
         layout.addWidget(self.table)
 
         self.setLayout(layout)
@@ -120,9 +158,11 @@ class RoomsPage(QWidget):
             for row, r in enumerate(rooms):
                 self.table.setItem(row, 0, QTableWidgetItem(str(r.id_room)))
                 self.table.setItem(row, 1, QTableWidgetItem(str(r.room_number)))
-                self.table.setItem(row, 2, QTableWidgetItem(r.room_type))
+
+                # room_type теперь CSV: "lecture,classroom"
+                self.table.setItem(row, 2, QTableWidgetItem(type_labels_csv(r.room_type)))
+
                 self.table.setItem(row, 3, QTableWidgetItem(str(r.capacity)))
-                self.table.setItem(row, 4, QTableWidgetItem("" if r.building is None else str(r.building)))
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))
 
@@ -138,13 +178,21 @@ class RoomsPage(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        rid, number, rtype, cap, building = dlg.values()
+        number, types, cap = dlg.values()
         if not number:
             QMessageBox.warning(self, "Проверка", "Номер аудитории не может быть пустым.")
             return
+        if not types:
+            QMessageBox.warning(self, "Проверка", "Выберите хотя бы один тип аудитории.")
+            return
 
         try:
-            self.rooms_repo.upsert(rid, number, rtype, cap, building=building)
+            self.rooms_repo.create(
+                room_number=number,
+                room_type=types_to_csv(types),
+                capacity=cap,
+                building=None,  # корпус больше не используем
+            )
             self.refresh()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))
@@ -157,30 +205,37 @@ class RoomsPage(QWidget):
 
         row = self.table.currentRow()
         number = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
-        rtype = self.table.item(row, 2).text() if self.table.item(row, 2) else "lecture"
+        # Здесь в таблице мы показываем лейблы, поэтому подтянем реальное значение из БД:
+        room = self.rooms_repo.get_by_id(rid)
+        types_csv = room.room_type if room else "classroom"
         cap = int(self.table.item(row, 3).text()) if self.table.item(row, 3) else 30
-        building = self.table.item(row, 4).text() if self.table.item(row, 4) else ""
 
         dlg = RoomDialog(
             self,
             title="Редактировать аудиторию",
-            id_value=rid,
             number_value=number,
-            type_value=rtype,
+            types_csv_value=types_csv,
             capacity_value=cap,
-            building_value=building,
-            is_edit=True,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        _rid, number, rtype, cap, building = dlg.values()
+        number, types, cap = dlg.values()
         if not number:
             QMessageBox.warning(self, "Проверка", "Номер аудитории не может быть пустым.")
             return
+        if not types:
+            QMessageBox.warning(self, "Проверка", "Выберите хотя бы один тип аудитории.")
+            return
 
         try:
-            self.rooms_repo.upsert(rid, number, rtype, cap, building=building)
+            self.rooms_repo.update(
+                id_room=rid,
+                room_number=number,
+                room_type=types_to_csv(types),
+                capacity=cap,
+                building=None,
+            )
             self.refresh()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))

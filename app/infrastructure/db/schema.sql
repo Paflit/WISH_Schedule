@@ -38,11 +38,15 @@ CREATE TABLE IF NOT EXISTS Classes (
 );
 
 CREATE TABLE IF NOT EXISTS TeacherSubjects (
-  teacher_id INTEGER NOT NULL,
-  subject_id INTEGER NOT NULL,
-  PRIMARY KEY (teacher_id, subject_id),
-  FOREIGN KEY (teacher_id) REFERENCES Teachers(id_teacher) ON DELETE CASCADE,
-  FOREIGN KEY (subject_id) REFERENCES Subjects(id_subject) ON DELETE CASCADE
+    teacher_id INTEGER NOT NULL,
+    subject_id INTEGER NOT NULL,
+    can_lecture INTEGER NOT NULL DEFAULT 1,
+    can_practice INTEGER NOT NULL DEFAULT 1,
+    can_computer_practice INTEGER NOT NULL DEFAULT 1,
+    can_lab INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (teacher_id, subject_id),
+    FOREIGN KEY (teacher_id) REFERENCES Teachers(id_teacher) ON DELETE CASCADE,
+    FOREIGN KEY (subject_id) REFERENCES Subjects(id_subject) ON DELETE CASCADE
 );
 
 -- ===============================

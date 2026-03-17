@@ -1,21 +1,4 @@
 # app/presentation/viewmodels/editor_vm.py
-"""
-EditorViewModel
-
-ViewModel для экрана ручного редактирования расписания.
-
-Задачи:
-- загрузить список вариантов расписания (для combo)
-- загрузить вариант и преобразовать в grid-структуру для UI
-- применить ручную правку через ApplyManualEditUseCase
-- перезагрузить данные после правки
-
-Page (EditorPage) должен:
-- подписаться на сигналы error/info/loading
-- вызывать методы VM
-- отображать grid
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -43,8 +26,6 @@ class EditorViewModel(BaseViewModel):
         self.schedule_repo = container.schedule_repo
         self.apply_edit_uc = container.apply_manual_edit_uc
 
-    # ---------------------------------------------------------
-
     def load_variants(self, calendar_id: Optional[int] = None) -> List[Dict]:
         """
         Возвращает список вариантов для combo.
@@ -62,8 +43,6 @@ class EditorViewModel(BaseViewModel):
             ]
 
         return self.execute(_load) or []
-
-    # ---------------------------------------------------------
 
     def load_variant_grid(self, variant_id: int) -> Tuple[int, Dict[Tuple[int, int], GridCell]]:
         """
@@ -98,7 +77,7 @@ class EditorViewModel(BaseViewModel):
                 first_entry = items[0][0]
                 grid_cells[key] = GridCell(
                     text=merged_text,
-                    schedule_entry_id=getattr(first_entry, "event_id", None),
+                    schedule_entry_id=getattr(first_entry, "id_schedule", None),
                     locked=getattr(first_entry, "is_locked", False),
                 )
 
@@ -108,8 +87,6 @@ class EditorViewModel(BaseViewModel):
         if result is None:
             return 0, {}
         return result
-
-    # ---------------------------------------------------------
 
     def apply_edit(
         self,

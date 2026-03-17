@@ -15,7 +15,8 @@ Use-case: ручная корректировка расписания.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, is_dataclass, replace
 from typing import Optional
 
 from app.domain.exceptions import ValidationError
@@ -61,7 +62,7 @@ class ApplyManualEditUseCase:
     def execute(self, command: ApplyManualEditCommand) -> ScheduleEntryDTO:
         """
         1) Получаем текущую запись расписания
-        2) Применяем изменения
+        2) Создаём отдельную копию с изменениями
         3) Проверяем конфликты
         4) Сохраняем
         5) Возвращаем обновлённый DTO
@@ -69,25 +70,22 @@ class ApplyManualEditUseCase:
 
         entry = self._schedule_repo.get_entry_by_id(
             command.variant_id,
-            command.schedule_entry_id
+            command.schedule_entry_id,
         )
 
         if entry is None:
             raise ValidationError("Запись расписания не найдена.")
 
-        updated = entry
+        # Отдельный снимок "до" для корректного логирования
+        before = deepcopy(entry)
 
-        # ----------------------------------------------------
-        # Применяем изменения (локально)
-        # ----------------------------------------------------
-        if command.new_slot_id is not None:
-            updated.slot_id = command.new_slot_id
-
-        if command.new_teacher_id is not None:
-            updated.teacher_id = command.new_teacher_id
-
-        if command.new_room_id is not None:
-            updated.room_id = command.new_room_id
+        # Создаём НОВЫЙ объект, не мутируя исходный
+        updated = self._build_updated_entry(
+            entry=entry,
+            new_slot_id=command.new_slot_id,
+            new_teacher_id=command.new_teacher_id,
+            new_room_id=command.new_room_id,
+        )
 
         # ----------------------------------------------------
         # Проверка конфликтов
@@ -105,16 +103,62 @@ class ApplyManualEditUseCase:
                 schedule_entry_id=command.schedule_entry_id,
             )
 
-        # Логирование изменения
+        # Для лога и возвращаемого результата читаем актуальную запись заново
+        fresh = self._schedule_repo.get_entry_by_id(
+            command.variant_id,
+            command.schedule_entry_id,
+        )
+        if fresh is None:
+            raise ValidationError("Запись расписания исчезла после сохранения.")
+
         self._schedule_repo.log_edit(
             variant_id=command.variant_id,
             edited_by=command.edited_by,
             action="manual_edit",
-            before=entry,
-            after=updated,
+            before=before,
+            after=fresh,
         )
 
-        return self._schedule_repo.to_dto(updated)
+        return self._schedule_repo.to_dto(fresh)
+
+    # --------------------------------------------------------
+
+    def _build_updated_entry(
+        self,
+        entry,
+        *,
+        new_slot_id: Optional[int],
+        new_teacher_id: Optional[int],
+        new_room_id: Optional[int],
+    ):
+        """
+        Возвращает НОВЫЙ объект записи с применёнными изменениями.
+
+        Поддерживает:
+        - dataclass / frozen dataclass через dataclasses.replace(...)
+        - обычные Python-объекты через deepcopy + setattr(...)
+        """
+        changes = {}
+
+        if new_slot_id is not None:
+            changes["slot_id"] = new_slot_id
+
+        if new_teacher_id is not None:
+            changes["teacher_id"] = new_teacher_id
+
+        if new_room_id is not None:
+            changes["room_id"] = new_room_id
+
+        if not changes:
+            return deepcopy(entry)
+
+        if is_dataclass(entry):
+            return replace(entry, **changes)
+
+        updated = deepcopy(entry)
+        for field_name, value in changes.items():
+            setattr(updated, field_name, value)
+        return updated
 
     # --------------------------------------------------------
 
@@ -155,17 +199,24 @@ class ApplyManualEditUseCase:
             raise ValidationError("Аудитория уже занята в этом слоте.")
 
         # Проверка типа аудитории
-        curriculum = self._schedule_repo.get_curriculum(entry.curriculum_id)
-        room = self._rooms_repo.get_by_id(entry.room_id)
+        curriculum_id = getattr(entry, "curriculum_id", None)
+        if curriculum_id is not None:
+            curriculum = self._schedule_repo.get_curriculum(curriculum_id)
+            room = self._rooms_repo.get_by_id(entry.room_id)
 
-        if curriculum.required_room_type != room.room_type:
-            raise ValidationError(
-                f"Тип аудитории '{room.room_type}' "
-                f"не соответствует требуемому '{curriculum.required_room_type}'."
-            )
+            room_types = [t.strip() for t in (room.room_type or "").split(",") if t.strip()]
+            required_room_type = getattr(curriculum, "required_room_type", None)
+
+            if required_room_type and required_room_type not in room_types:
+                raise ValidationError(
+                    f"Тип аудитории '{room.room_type}' не соответствует "
+                    f"требуемому '{required_room_type}'."
+                )
 
         # Проверка вместимости
         group = self._schedule_repo.get_group(entry.group_id)
+        room = self._rooms_repo.get_by_id(entry.room_id)
+
         if room.capacity < group.quantity:
             raise ValidationError(
                 f"Вместимость аудитории ({room.capacity}) "

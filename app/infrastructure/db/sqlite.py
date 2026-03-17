@@ -1,21 +1,3 @@
-# app/infrastructure/db/sqlite.py
-"""
-SQLite bootstrap.
-
-Задачи:
-- создать sqlite3.Connection factory (session_factory)
-- инициализировать схему (CREATE TABLE IF NOT EXISTS ...)
-- включить foreign keys
-
-Почему sqlite3, а не SQLAlchemy:
-- MVP быстрее и проще.
-- Позже можно заменить, не трогая application слой (через ports/repositories).
-
-Важно:
-- session_factory возвращает НОВОЕ соединение (connection) на каждый вызов.
-- Используем контекстный менеджер: `with session_factory() as conn: ...`
-"""
-
 from __future__ import annotations
 
 import sqlite3
@@ -60,11 +42,15 @@ CREATE TABLE IF NOT EXISTS Classes (
 );
 
 CREATE TABLE IF NOT EXISTS TeacherSubjects (
-  teacher_id INTEGER NOT NULL,
-  subject_id INTEGER NOT NULL,
-  PRIMARY KEY (teacher_id, subject_id),
-  FOREIGN KEY (teacher_id) REFERENCES Teachers(id_teacher) ON DELETE CASCADE,
-  FOREIGN KEY (subject_id) REFERENCES Subjects(id_subject) ON DELETE CASCADE
+    teacher_id INTEGER NOT NULL,
+    subject_id INTEGER NOT NULL,
+    can_lecture INTEGER NOT NULL DEFAULT 1,
+    can_practice INTEGER NOT NULL DEFAULT 1,
+    can_computer_practice INTEGER NOT NULL DEFAULT 1,
+    can_lab INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (teacher_id, subject_id),
+    FOREIGN KEY (teacher_id) REFERENCES Teachers(id_teacher) ON DELETE CASCADE,
+    FOREIGN KEY (subject_id) REFERENCES Subjects(id_subject) ON DELETE CASCADE
 );
 
 -- -----------------------

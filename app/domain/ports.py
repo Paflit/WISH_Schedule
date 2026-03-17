@@ -1,139 +1,132 @@
-# app/domain/ports.py
-"""
-Domain Ports (абстракции).
-
-Здесь описываются интерфейсы (контракты), через которые
-application слой взаимодействует с инфраструктурой.
-
-Зачем это нужно:
-- application и domain НЕ зависят от SQLite
-- можно заменить БД (Postgres, API, mock)
-- можно тестировать use-cases без реальной БД
-"""
-
 from __future__ import annotations
-from abc import ABC, abstractmethod
-from typing import List, Dict, Tuple, Optional
+
+from typing import Protocol, Dict, Tuple, Optional, List
 
 from app.domain.models import (
     Teacher,
     StudentGroup,
     Subject,
     Room,
+    AcademicCalendar,
+    SemesterWeek,
     TimeSlot,
     CurriculumItem,
+    SemesterPlan,
+    WeeklyLoadPlan,
     Event,
     Solution,
 )
-from app.application.dto.schedule_dto import ScheduleVariantDTO
 
 
 # ============================================================
 # Teachers
 # ============================================================
 
-class TeachersRepositoryPort(ABC):
-
-    @abstractmethod
+class TeachersRepositoryPort(Protocol):
     def list_all(self) -> List[Teacher]:
-        pass
+        ...
 
-    @abstractmethod
-    def get_teacher_subject_matrix(self) -> Dict[Tuple[int, int], bool]:
+    def get_teacher_part_matrix(self) -> Dict[Tuple[int, int, str], bool]:
         """
-        Возвращает dict[(teacher_id, subject_id)] -> True
+        Матрица допуска преподавателя по дисциплине и типу занятия:
+        (teacher_id, subject_id, part_type) -> bool
         """
-        pass
+        ...
 
-    @abstractmethod
     def get_availability_matrix(self, calendar_id: int) -> Dict[Tuple[int, int], bool]:
         """
-        dict[(teacher_id, slot_id)] -> is_available
+        Доступность преподавателя по слотам:
+        (teacher_id, slot_id) -> is_available
         """
-        pass
+        ...
 
 
 # ============================================================
-# Groups
+# Groups / Subjects / Rooms
 # ============================================================
 
-class GroupsRepositoryPort(ABC):
-
-    @abstractmethod
+class GroupsRepositoryPort(Protocol):
     def list_all(self) -> List[StudentGroup]:
-        pass
+        ...
 
 
-# ============================================================
-# Subjects
-# ============================================================
-
-class SubjectsRepositoryPort(ABC):
-
-    @abstractmethod
+class SubjectsRepositoryPort(Protocol):
     def list_all(self) -> List[Subject]:
-        pass
+        ...
 
 
-# ============================================================
-# Rooms
-# ============================================================
-
-class RoomsRepositoryPort(ABC):
-
-    @abstractmethod
+class RoomsRepositoryPort(Protocol):
     def list_all(self) -> List[Room]:
-        pass
-
-    @abstractmethod
-    def get_by_id(self, room_id: int) -> Optional[Room]:
-        pass
+        ...
 
 
 # ============================================================
 # Calendar
 # ============================================================
 
-class CalendarRepositoryPort(ABC):
+class CalendarRepositoryPort(Protocol):
+    def list_all(self) -> List[AcademicCalendar]:
+        ...
 
-    @abstractmethod
-    def get_calendar(self, calendar_id: int):
-        pass
+    def get_calendar(self, calendar_id: int) -> Optional[AcademicCalendar]:
+        ...
 
-    @abstractmethod
     def list_time_slots(self, calendar_id: int) -> List[TimeSlot]:
-        pass
+        ...
 
 
 # ============================================================
 # Curriculum
 # ============================================================
 
-class CurriculumRepositoryPort(ABC):
-
-    @abstractmethod
+class CurriculumRepositoryPort(Protocol):
     def list_curriculum_items(self, calendar_id: int) -> List[CurriculumItem]:
-        pass
+        """
+        Совместимый метод для старых частей системы.
+        Возвращает только те CurriculumItem, которые участвуют
+        в выбранном полугодии.
+        """
+        ...
 
-    @abstractmethod
-    def build_events(
-        self,
-        calendar_id: int,
-        hours_per_pair: int,
-    ) -> List[Event]:
+    def get_semester_plans(self, calendar_id: int):
         """
-        Возвращает список Event для оптимизации.
+        Возвращает semester plans выбранного полугодия.
+        Допускается возврат объектов с доступом через точку
+        (например, SimpleNamespace) либо явных SemesterPlan.
         """
-        pass
+        ...
+
+    def get_curriculum_items_for_plans(self, plans_or_calendar_id):
+        """
+        Возвращает словарь:
+            {curriculum_id: curriculum_item}
+        где curriculum_item имеет поля:
+        - id_curriculum
+        - group_id
+        - subject_id
+        - part_type
+        - required_room_type
+        """
+        ...
+
+    def get_weekly_plans(self, calendar_id: int):
+        """
+        Возвращает weekly load plan выбранного полугодия.
+        """
+        ...
+
+    def get_hours_for_curriculum(self, calendar_id: int) -> Dict[int, int]:
+        """
+        {curriculum_id: hours_in_semester}
+        """
+        ...
 
 
 # ============================================================
-# Schedule
+# Schedule variants
 # ============================================================
 
-class ScheduleRepositoryPort(ABC):
-
-    @abstractmethod
+class ScheduleRepositoryPort(Protocol):
     def create_variant(
         self,
         calendar_id: int,
@@ -142,46 +135,66 @@ class ScheduleRepositoryPort(ABC):
         objective_score: int,
         created_by: str,
     ) -> int:
-        pass
+        ...
 
-    @abstractmethod
-    def save_solution_entries(
-        self,
-        variant_id: int,
-        solution_entries: List,
-    ) -> None:
-        pass
+    def save_solution_entries(self, variant_id: int, solution_entries) -> None:
+        ...
 
-    @abstractmethod
-    def get_variant_dto(self, variant_id: int) -> ScheduleVariantDTO:
-        pass
+    def get_variant_dto(self, variant_id: int):
+        ...
 
-    @abstractmethod
+    def list_variants(self, calendar_id: Optional[int] = None):
+        ...
+
     def list_locks_for_calendar(self, calendar_id: int):
-        pass
+        ...
+
+
+# ============================================================
+# Event builder
+# ============================================================
+
+class EventBuilderPort(Protocol):
+    def build_events(
+        self,
+        calendar_id: int,
+        hours_per_pair: int,
+        locks: Optional[list] = None,
+    ) -> List[Event]:
+        ...
+
+
+# ============================================================
+# Rule profiles
+# ============================================================
+
+class RuleProfilesPort(Protocol):
+    def get(self, key: str):
+        ...
+
+    def list_keys(self) -> List[str]:
+        ...
 
 
 # ============================================================
 # Solver
 # ============================================================
 
-class ScheduleSolverPort(ABC):
-
-    @abstractmethod
+class ScheduleSolverPort(Protocol):
     def solve(
         self,
         teachers: List[Teacher],
         groups: List[StudentGroup],
         rooms: List[Room],
         slots: List[TimeSlot],
-        curriculum: Dict[int, CurriculumItem],
+        curriculum,
         events: List[Event],
-        teacher_subjects: Dict[Tuple[int, int], bool],
+        teacher_subjects: Dict[Tuple[int, int, str], bool],
         teacher_availability: Dict[Tuple[int, int], bool],
         rules,
-        k_solutions: int,
-        time_limit_seconds: int,
-        random_seed: int,
-        locks=None,
+        k_solutions: int = 1,
+        time_limit_seconds: int = 1200,
+        random_seed: Optional[int] = None,
+        locks: Optional[list] = None,
     ) -> List[Solution]:
-        pass
+        ...

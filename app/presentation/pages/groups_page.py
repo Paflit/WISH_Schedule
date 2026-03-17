@@ -1,3 +1,4 @@
+# app/presentation/pages/groups_page.py
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
@@ -8,17 +9,20 @@ from PyQt6.QtWidgets import (
 
 
 class GroupDialog(QDialog):
+    """
+    Диалог добавления/редактирования группы.
+    Курс выбирается строго из 1..5.
+    """
+
     def __init__(
         self,
         parent=None,
         *,
         title: str,
-        id_value: int | None = None,
         name_value: str = "",
-        year_value: int | None = None,
-        quantity_value: int = 0,
+        year_value: int = 1,
+        quantity_value: int = 25,
         education_form: str = "full-time",
-        is_edit: bool = False,
     ):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -26,36 +30,36 @@ class GroupDialog(QDialog):
 
         layout = QFormLayout(self)
 
-        self.id_spin = QSpinBox()
-        self.id_spin.setRange(1, 10**9)
-        if id_value is not None:
-            self.id_spin.setValue(id_value)
-            if is_edit:
-                self.id_spin.setEnabled(False)
-
         self.name_edit = QLineEdit()
         self.name_edit.setText(name_value)
 
-        self.year_spin = QSpinBox()
-        self.year_spin.setRange(0, 10)
-        self.year_spin.setValue(int(year_value) if year_value is not None else 0)
+        # Курс: только 1..5
+        self.year_combo = QComboBox()
+        for y in [1, 2, 3, 4, 5]:
+            self.year_combo.addItem(str(y), y)
+
+        # выставим текущий курс
+        try:
+            y = int(year_value)
+        except Exception:
+            y = 1
+        idx = self.year_combo.findData(y)
+        self.year_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
         self.qty_spin = QSpinBox()
         self.qty_spin.setRange(1, 500)
-        self.qty_spin.setValue(int(quantity_value) if quantity_value else 1)
+        self.qty_spin.setValue(int(quantity_value) if quantity_value else 25)
 
         self.form_combo = QComboBox()
         self.form_combo.addItem("очная (full-time)", "full-time")
         self.form_combo.addItem("очно-заочная (part-time)", "part-time")
         self.form_combo.addItem("заочная (distance)", "distance")
-        # выставим текущее
         idx = self.form_combo.findData(education_form)
         if idx >= 0:
             self.form_combo.setCurrentIndex(idx)
 
-        layout.addRow("ID:", self.id_spin)
         layout.addRow("Группа:", self.name_edit)
-        layout.addRow("Курс (0 = не задан):", self.year_spin)
+        layout.addRow("Курс:", self.year_combo)
         layout.addRow("Количество студентов:", self.qty_spin)
         layout.addRow("Форма обучения:", self.form_combo)
 
@@ -67,13 +71,11 @@ class GroupDialog(QDialog):
         layout.addRow(buttons)
 
     def values(self):
-        year = self.year_spin.value()
         return (
-            self.id_spin.value(),
             self.name_edit.text().strip(),
-            None if year == 0 else year,
-            self.qty_spin.value(),
-            self.form_combo.currentData(),
+            int(self.year_combo.currentData()),          # всегда 1..5
+            int(self.qty_spin.value()),
+            str(self.form_combo.currentData()),
         )
 
 
@@ -121,6 +123,7 @@ class GroupsPage(QWidget):
             for row, g in enumerate(groups):
                 self.table.setItem(row, 0, QTableWidgetItem(str(g.id_group)))
                 self.table.setItem(row, 1, QTableWidgetItem(g.group_name))
+                # курс теперь всегда число 1..5
                 self.table.setItem(row, 2, QTableWidgetItem("" if g.year is None else str(g.year)))
                 self.table.setItem(row, 3, QTableWidgetItem(str(g.quantity)))
         except Exception as e:
@@ -134,17 +137,17 @@ class GroupsPage(QWidget):
         return int(item.text()) if item else None
 
     def add_group(self):
-        dlg = GroupDialog(self, title="Добавить группу")
+        dlg = GroupDialog(self, title="Добавить группу", year_value=1, quantity_value=25)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        gid, name, year, qty, form = dlg.values()
+        name, year, qty, form = dlg.values()
         if not name:
             QMessageBox.warning(self, "Проверка", "Название группы не может быть пустым.")
             return
 
         try:
-            self.groups_repo.upsert(gid, name, year=year, quantity=qty, education_form=form)
+            self.groups_repo.create(group_name=name, year=year, quantity=qty, education_form=form)
             self.refresh()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))
@@ -158,30 +161,31 @@ class GroupsPage(QWidget):
         row = self.table.currentRow()
         name = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
         year_txt = self.table.item(row, 2).text() if self.table.item(row, 2) else ""
-        year = int(year_txt) if year_txt.strip() else None
-        qty = int(self.table.item(row, 3).text()) if self.table.item(row, 3) else 1
+        try:
+            year = int(year_txt) if year_txt.strip() else 1
+        except Exception:
+            year = 1
+        qty = int(self.table.item(row, 3).text()) if self.table.item(row, 3) else 25
 
-        # education_form в таблице не показываем — оставим full-time по умолчанию
+        # education_form не показываем в таблице, оставим full-time по умолчанию (можешь расширить позже)
         dlg = GroupDialog(
             self,
             title="Редактировать группу",
-            id_value=gid,
             name_value=name,
             year_value=year,
             quantity_value=qty,
             education_form="full-time",
-            is_edit=True,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        _gid, name, year, qty, form = dlg.values()
+        name, year, qty, form = dlg.values()
         if not name:
             QMessageBox.warning(self, "Проверка", "Название группы не может быть пустым.")
             return
 
         try:
-            self.groups_repo.upsert(gid, name, year=year, quantity=qty, education_form=form)
+            self.groups_repo.update(id_group=gid, group_name=name, year=year, quantity=qty, education_form=form)
             self.refresh()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))

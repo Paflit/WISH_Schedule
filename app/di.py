@@ -1,17 +1,3 @@
-# app/di.py
-"""
-DI (Dependency Injection) контейнер.
-
-Задачи:
-- собрать инфраструктурные зависимости (БД, репозитории, импорт/экспорт, оптимизатор)
-- собрать use-cases (application слой)
-- отдать "container" (словарь) для GUI слоя, чтобы presentation ничего не знала
-  про конкретные реализации инфраструктуры.
-
-Контейнер сделан максимально простым: обычный dict[str, object].
-При желании легко заменить на dependency-injector / punq и т.п.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -50,10 +36,6 @@ from app.domain.rules import DefaultRuleProfiles
 
 @dataclass(frozen=True)
 class Container:
-    """
-    Тонкая типизированная обёртка над dict-контейнером.
-    В GUI можно использовать container.xxx вместо container["xxx"].
-    """
     config: AppConfig
 
     # Repositories
@@ -108,6 +90,14 @@ def build_container() -> Container:
     calendar_repo = SqliteCalendarRepository(session_factory)
     curriculum_repo = SqliteCurriculumRepository(session_factory)
     schedule_repo = SqliteScheduleRepository(session_factory)
+    calendar_repo.ensure_default_calendar(
+        academic_year="2025/2026",
+        include_saturday=True,
+        pairs_per_day=8,
+    )
+
+    # пересобираем weekly plan для уже существующих semester plans
+    curriculum_repo.rebuild_all_weekly_plans()
 
     # 4) Domain profiles (готовые наборы весов/правил для UI)
     rule_profiles = DefaultRuleProfiles()
@@ -121,6 +111,7 @@ def build_container() -> Container:
         calendar_repo=calendar_repo,
         curriculum_repo=curriculum_repo,
     )
+
     excel_export = ExcelExportService(
         teachers_repo=teachers_repo,
         subjects_repo=subjects_repo,
@@ -134,7 +125,8 @@ def build_container() -> Container:
     event_builder = EventBuilder(
         curriculum_repo=curriculum_repo,
         calendar_repo=calendar_repo,
-        rules_repo=calendar_repo,  # MVP: правила храним/читаем через calendar_repo или отдельный repo
+        groups_repo=groups_repo,
+        rooms_repo=rooms_repo,
     )
 
     solver = CPSatScheduleSolver()

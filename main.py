@@ -4,7 +4,14 @@ from app.presentation.create_shortcut_win import create_desktop_shortcut
 
 def main():
     container = build_container()
-    create_desktop_shortcut("PracticWISH")
+    container.calendar_repo.ensure_default_calendar(
+        academic_year="2025/2026",
+        include_saturday=False,
+        pairs_per_day=8,
+        weeks_in_semester=18,
+    )
+    container.curriculum_repo.rebuild_all_weekly_plans()
+    #create_desktop_shortcut("PracticWISH")
     run(container)
 
 if __name__ == "__main__":

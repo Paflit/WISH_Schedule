@@ -1,25 +1,7 @@
-# app/application/use_cases/generate_schedule.py
-"""
-Use-case: генерация расписания (несколько вариантов) на основе:
-- календарного учебного графика (AcademicCalendar + SemesterWeeks + TimeSlots)
-- учебного плана на семестр (CurriculumSemesterPlan + WeeklyLoadPlan)
-- справочников (teachers, groups, rooms, subjects)
-- пожеланий преподавателей (TeacherAvailability)
-- правил/весов (SchedulingRules / профили оптимизации)
-
-Use-case НЕ строит модель OR-Tools напрямую.
-Он:
-1) Загружает данные через репозитории
-2) Строит список Event через EventBuilder
-3) Вызывает solver (CPSatScheduleSolver)
-4) Сохраняет варианты в БД (ScheduleVariants + ScheduleEntries)
-5) Возвращает DTO для GUI
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Callable, Optional
 
 from app.application.dto.schedule_dto import (
     GenerationResultDTO,
@@ -28,39 +10,15 @@ from app.application.dto.schedule_dto import (
 from app.domain.exceptions import ValidationError
 
 
-# ------------------------------------------------------------
-# Команда генерации
-# ------------------------------------------------------------
+ProgressCallback = Optional[Callable[[str, dict], None]]
+
 
 @dataclass(frozen=True)
 class GenerateScheduleCommand:
     calendar_id: int
+    variants_count: int
+    time_limit_seconds: int
 
-    # профили правил: "students", "teachers", "balanced", ...
-    rule_profile_key: str = "balanced"
-
-    # сколько вариантов хотим
-    variants_count: Optional[int] = None
-
-    # лимит времени на один запуск решателя
-    time_limit_seconds: Optional[int] = None
-
-    # random seed (для разнообразия)
-    random_seed: Optional[int] = None
-
-    # если True — учитывать локи (ScheduleLocks) как hard constraints
-    respect_locks: bool = True
-
-    # имя префикса для создаваемых вариантов
-    variant_name_prefix: str = "Auto"
-
-    # кто запускает
-    created_by: str = "admin"
-
-
-# ------------------------------------------------------------
-# Use-case
-# ------------------------------------------------------------
 
 class GenerateScheduleUseCase:
     def __init__(
@@ -89,63 +47,156 @@ class GenerateScheduleUseCase:
         self._rule_profiles = rule_profiles
         self._config = config
 
-    # --------------------------------------------------------
+    def _emit(self, progress_cb: ProgressCallback, stage: str, **payload):
+        if progress_cb is not None:
+            progress_cb(stage, payload)
 
-    def execute(self, command: GenerateScheduleCommand) -> GenerationResultDTO:
-        # 1) Проверим календарь
-        calendar = self._calendar_repo.get_calendar(command.calendar_id)
+    def execute(
+        self,
+        command: GenerateScheduleCommand,
+        progress_cb: ProgressCallback = None,
+    ) -> GenerationResultDTO:
+        self._emit(
+            progress_cb,
+            "start",
+            calendar_id=int(command.calendar_id),
+            variants_count=int(command.variants_count),
+            time_limit_seconds=int(command.time_limit_seconds),
+        )
+
+        calendar = self._calendar_repo.get_calendar(int(command.calendar_id))
         if calendar is None:
-            raise ValidationError("Календарь/семестр не найден.")
+            raise ValidationError(f"Календарь id={command.calendar_id} не найден.")
 
-        # 2) Возьмём правила/веса по профилю
-        rules = self._rule_profiles.get(command.rule_profile_key)
-        if rules is None:
-            raise ValidationError(f"Профиль правил '{command.rule_profile_key}' не найден.")
+        self._emit(
+            progress_cb,
+            "calendar_loaded",
+            academic_year=str(getattr(calendar, "academic_year", "")),
+            semester=int(getattr(calendar, "semester", 0) or 0),
+        )
 
-        variants_count = command.variants_count or self._config.solver_variants_count
-        time_limit = command.time_limit_seconds or self._config.solver_time_limit_seconds
-        random_seed = command.random_seed or self._config.solver_random_seed
+        semester_plans = self._curriculum_repo.get_semester_plans(int(command.calendar_id))
+        semester_plans = [
+            p for p in semester_plans
+            if int(getattr(p, "hours_in_semester", 0) or 0) > 0
+        ]
 
-        # 3) Загрузим справочники и данные семестра
+        self._emit(
+            progress_cb,
+            "semester_plans_loaded",
+            semester_plans_count=len(semester_plans),
+            total_semester_hours=sum(
+                int(getattr(p, "hours_in_semester", 0) or 0) for p in semester_plans
+            ),
+        )
+
+        if not semester_plans:
+            raise ValidationError(
+                "Для выбранного полугодия в учебном плане нет дисциплин с часами."
+            )
+
+        weekly_plans = self._curriculum_repo.get_weekly_plans(int(command.calendar_id))
+        weekly_plans = [
+            w for w in weekly_plans
+            if int(getattr(w, "hours_this_week", 0) or 0) > 0
+        ]
+
+        self._emit(
+            progress_cb,
+            "weekly_plans_loaded",
+            weekly_plans_count=len(weekly_plans),
+            weekly_total_hours=sum(
+                int(getattr(w, "hours_this_week", 0) or 0) for w in weekly_plans
+            ),
+        )
+
         teachers = self._teachers_repo.list_all()
         groups = self._groups_repo.list_all()
         rooms = self._rooms_repo.list_all()
-        slots = self._calendar_repo.list_time_slots(calendar_id=command.calendar_id)
+        slots = self._calendar_repo.list_time_slots(int(command.calendar_id))
 
+        self._emit(
+            progress_cb,
+            "reference_data_loaded",
+            teachers_count=len(teachers),
+            groups_count=len(groups),
+            rooms_count=len(rooms),
+            slots_count=len(slots),
+        )
+
+        if not teachers:
+            raise ValidationError("Нет преподавателей.")
+        if not groups:
+            raise ValidationError("Нет групп.")
+        if not rooms:
+            raise ValidationError("Нет аудиторий.")
         if not slots:
-            raise ValidationError("Нет таймслотов для выбранного семестра. Заполните календарный график/сетку пар.")
+            raise ValidationError("Нет временных слотов для выбранного полугодия.")
 
-        # учебный план (на семестр)
-        curriculum_items = self._curriculum_repo.list_curriculum_items(calendar_id=command.calendar_id)
-        if not curriculum_items:
-            raise ValidationError("Нет учебного плана на семестр. Заполните CurriculumItems/CurriculumSemesterPlan.")
+        # Один общий набор правил для единого согласованного расписания
+        rules = self._rule_profiles.get("balanced")
+        if rules is None:
+            raise ValidationError("Не найден базовый профиль правил 'balanced'.")
 
-        curriculum_map = {c.id_curriculum: c for c in curriculum_items}
+        locks = self._schedule_repo.list_locks_for_calendar(int(command.calendar_id))
 
-        # связи преподаватель-предмет
-        teacher_subjects = self._teachers_repo.get_teacher_subject_matrix()  # dict[(teacher_id, subject_id)] -> bool
+        self._emit(
+            progress_cb,
+            "rules_loaded",
+            rules_profile="balanced",
+            locks_count=len(locks),
+        )
 
-        # доступность преподавателей (по слотам)
-        teacher_availability = self._teachers_repo.get_availability_matrix(calendar_id=command.calendar_id)
-        # dict[(teacher_id, slot_id)] -> bool
+        curriculum_map = self._curriculum_repo.get_curriculum_items_for_plans(semester_plans)
 
-        # 4) Локи (если есть) — передадим в event_builder/solver
-        locks = []
-        if command.respect_locks:
-            locks = self._schedule_repo.list_locks_for_calendar(calendar_id=command.calendar_id)
+        self._emit(
+            progress_cb,
+            "curriculum_map_loaded",
+            curriculum_items_count=len(curriculum_map),
+        )
 
-        # 5) Сформируем Events из семестрового плана (учитывая WeeklyLoadPlan)
-        # event_builder вернёт список domain-сущностей Event (не DTO)
+        if not curriculum_map:
+            raise ValidationError(
+                "Не найдено элементов учебного плана для выбранного полугодия."
+            )
+
+        teacher_subjects = self._teachers_repo.get_teacher_part_matrix()
+        teacher_availability = self._teachers_repo.get_availability_matrix(int(command.calendar_id))
+
+        self._emit(
+            progress_cb,
+            "availability_loaded",
+            teacher_subject_links=len(teacher_subjects),
+            availability_links=len(teacher_availability),
+        )
+
+        self._emit(progress_cb, "building_events")
+
         events = self._event_builder.build_events(
-            calendar_id=command.calendar_id,
-            hours_per_pair=self._config.hours_per_pair,
+            calendar_id=int(command.calendar_id),
+            hours_per_pair=int(getattr(self._config, "hours_per_pair", 2)),
             locks=locks,
         )
 
-        if not events:
-            raise ValidationError("Список событий (занятий) пуст. Проверьте часы в семестровом плане/недельном плане.")
+        self._emit(
+            progress_cb,
+            "events_built",
+            events_count=len(events),
+        )
 
-        # 6) Запустим solver: получим K решений
+        if not events:
+            raise ValidationError("Не удалось построить события для генерации.")
+
+        self._schedule_repo.set_generation_events(events)
+
+        self._emit(
+            progress_cb,
+            "solver_started",
+            k_solutions=int(command.variants_count),
+            time_limit_seconds=int(command.time_limit_seconds),
+            random_seed=int(getattr(self._config, "random_seed", 1)),
+        )
+
         solutions = self._solver.solve(
             teachers=teachers,
             groups=groups,
@@ -156,34 +207,66 @@ class GenerateScheduleUseCase:
             teacher_subjects=teacher_subjects,
             teacher_availability=teacher_availability,
             rules=rules,
-            k_solutions=variants_count,
-            time_limit_seconds=time_limit,
-            random_seed=random_seed,
-            locks=locks if command.respect_locks else None,
+            k_solutions=int(command.variants_count),
+            time_limit_seconds=int(command.time_limit_seconds),
+            random_seed=int(getattr(self._config, "random_seed", 1)),
+            locks=locks,
+        )
+
+        self._emit(
+            progress_cb,
+            "solver_finished",
+            solutions_count=len(solutions),
         )
 
         if not solutions:
-            raise ValidationError("Не удалось построить ни одного варианта. Проверьте ограничения/доступность/аудитории.")
+            raise ValidationError("Solver не нашёл ни одного допустимого варианта.")
 
-        # 7) Сохраним варианты в БД и соберём DTO для GUI
-        variant_dtos: List[ScheduleVariantDTO] = []
-        for idx, sol in enumerate(solutions, start=1):
-            variant_name = f"{command.variant_name_prefix} #{idx} ({command.rule_profile_key})"
+        variants: list[ScheduleVariantDTO] = []
+
+        semester = int(getattr(calendar, "semester", 0) or 0)
+        year = str(getattr(calendar, "academic_year", "") or "")
+
+        for idx, solution in enumerate(solutions, start=1):
+            variant_name = f"{year}_semester_{semester}_variant_{idx}"
+
+            self._emit(
+                progress_cb,
+                "saving_variant",
+                variant_index=idx,
+                entries_count=len(getattr(solution, "entries", []) or []),
+                objective_value=int(getattr(solution, "objective_value", 0) or 0),
+            )
+
             variant_id = self._schedule_repo.create_variant(
-                calendar_id=command.calendar_id,
-                rule_profile_key=command.rule_profile_key,
+                calendar_id=int(command.calendar_id),
+                rule_profile_key="balanced",
                 name=variant_name,
-                objective_score=sol.objective_value,
-                created_by=command.created_by,
+                objective_score=int(getattr(solution, "objective_value", 0) or 0),
+                created_by="generator",
             )
 
             self._schedule_repo.save_solution_entries(
                 variant_id=variant_id,
-                solution_entries=sol.entries,   # list[SolutionEntry] (event_id, slot_id, teacher_id, room_id)
+                solution_entries=list(getattr(solution, "entries", []) or []),
             )
 
-            # Переводим в DTO (репозиторий знает имена, предметы, и т.д.)
-            dto = self._schedule_repo.get_variant_dto(variant_id)
-            variant_dtos.append(dto)
+            variant_dto = self._schedule_repo.get_variant_dto(int(variant_id))
+            variants.append(variant_dto)
 
-        return GenerationResultDTO(variants=variant_dtos)
+            self._emit(
+                progress_cb,
+                "variant_saved",
+                variant_index=idx,
+                variant_id=int(variant_id),
+                variant_name=str(getattr(variant_dto, "name", "") or ""),
+                dto_entries_count=len(getattr(variant_dto, "entries", []) or []),
+            )
+
+        self._emit(
+            progress_cb,
+            "done",
+            variants_count=len(variants),
+        )
+
+        return GenerationResultDTO(variants=variants)
