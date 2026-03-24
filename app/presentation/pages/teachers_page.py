@@ -1,4 +1,3 @@
-# app/presentation/pages/teachers_page.py
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
@@ -441,7 +440,7 @@ class TeachersPage(QWidget):
                     suffix = f" [{', '.join(parts)}]" if parts else ""
                     subject_lines.append(f"{subject_map[sid]}{suffix}")
 
-                subjects_text = "[\n" + ",\n".join(subject_lines) + "\n]" if subject_lines else "[]"
+                subjects_text = ",".join(subject_lines) if subject_lines else "[]"
 
                 self.table.setItem(row, 0, QTableWidgetItem(str(t.id_teacher)))
                 self.table.setItem(row, 1, QTableWidgetItem(t.full_name))

@@ -1,4 +1,3 @@
-# app/presentation/pages/curriculum_page.py
 from __future__ import annotations
 
 from dataclasses import dataclass

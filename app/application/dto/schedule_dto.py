@@ -1,4 +1,3 @@
-# app/application/dto/schedule_dto.py
 """
 DTO для передачи данных расписания между слоями.
 

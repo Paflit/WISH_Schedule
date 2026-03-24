@@ -16,7 +16,6 @@ from app.application.use_cases.generate_schedule import GenerateScheduleCommand
 def emit(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
-
 def progress_cb(stage: str, payload: dict) -> None:
     emit({
         "type": "progress",
@@ -24,7 +23,6 @@ def progress_cb(stage: str, payload: dict) -> None:
         "payload": payload,
         "message": f"{stage}: {payload}",
     })
-
 
 def main() -> int:
     try:

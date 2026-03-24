@@ -1,4 +1,3 @@
-# app/presentation/widgets/table_view.py
 """
 SimpleTableView
 

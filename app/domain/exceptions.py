@@ -1,4 +1,3 @@
-# app/domain/exceptions.py
 """
 Доменные исключения.
 

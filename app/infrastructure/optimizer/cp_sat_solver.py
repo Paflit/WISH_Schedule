@@ -1,5 +1,3 @@
-# app/infrastructure/optimizer/cp_sat_solver.py
-
 from __future__ import annotations
 
 from dataclasses import dataclass

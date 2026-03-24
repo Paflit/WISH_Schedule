@@ -1,4 +1,3 @@
-# app/presentation/qt_app.py
 import sys
 import traceback
 

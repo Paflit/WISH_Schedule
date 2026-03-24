@@ -1,4 +1,3 @@
-# app/presentation/viewmodels/editor_vm.py
 from __future__ import annotations
 
 from dataclasses import dataclass

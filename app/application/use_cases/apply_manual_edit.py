@@ -1,4 +1,3 @@
-# app/application/use_cases/apply_manual_edit.py
 """
 Use-case: ручная корректировка расписания.
 

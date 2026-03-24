@@ -1,4 +1,3 @@
-# app/application/use_cases/save_variant.py
 """
 Use-case: сохранение/обновление метаданных варианта расписания.
 

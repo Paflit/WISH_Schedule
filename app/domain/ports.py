@@ -17,11 +17,6 @@ from app.domain.models import (
     Solution,
 )
 
-
-# ============================================================
-# Teachers
-# ============================================================
-
 class TeachersRepositoryPort(Protocol):
     def list_all(self) -> List[Teacher]:
         ...

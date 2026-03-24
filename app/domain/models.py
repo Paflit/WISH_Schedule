@@ -3,11 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional, List
 
-
-# ============================================================
-# Core dictionaries
-# ============================================================
-
 @dataclass(frozen=True)
 class Teacher:
     """

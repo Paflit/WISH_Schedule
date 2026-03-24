@@ -1,4 +1,3 @@
-# app/presentation/viewmodels/dictionaries_vm.py
 """
 DictionariesViewModel
 

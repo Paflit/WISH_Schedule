@@ -22,7 +22,6 @@ from PyQt6.QtWidgets import (
 
 from app.application.use_cases.save_variant import SaveVariantCommand
 
-
 class ApproveGeneratedDialog(QDialog):
     def __init__(self, current_name: str, parent=None):
         super().__init__(parent)

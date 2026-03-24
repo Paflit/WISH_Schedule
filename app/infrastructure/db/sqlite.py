@@ -4,7 +4,6 @@ import sqlite3
 from pathlib import Path
 from typing import Callable, Tuple
 
-
 SchemaSQL = """
 PRAGMA foreign_keys = ON;
 

@@ -1,4 +1,3 @@
-# app/application/use_cases/export_data.py
 """
 Use-case: экспорт данных и/или расписания.
 

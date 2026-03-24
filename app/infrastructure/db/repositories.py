@@ -18,10 +18,6 @@ from app.application.dto.schedule_dto import (
 )
 from types import SimpleNamespace
 
-# ============================================================
-# Helpers
-# ============================================================
-
 def _row_to_dict(cursor, row):
     return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
 

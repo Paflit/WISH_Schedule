@@ -1,4 +1,3 @@
-# app/presentation/viewmodels/variants_vm.py
 """
 VariantsViewModel
 

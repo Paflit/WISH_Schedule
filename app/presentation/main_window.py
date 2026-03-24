@@ -12,7 +12,6 @@ from app.presentation.pages.generate_page import GeneratePage
 from app.presentation.pages.variants_page import VariantsPage
 from app.presentation.pages.editor_page import EditorPage
 
-
 class MainWindow(QMainWindow):
     def __init__(self, container):
         super().__init__()

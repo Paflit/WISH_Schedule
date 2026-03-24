@@ -1,4 +1,3 @@
-# app/presentation/viewmodels/base_vm.py
 """
 BaseViewModel
 

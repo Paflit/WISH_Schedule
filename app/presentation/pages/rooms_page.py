@@ -8,7 +8,6 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-
 # Какие типы поддерживаем (можешь расширять)
 ROOM_TYPES = [
     ("lecture", "Лекционная"),

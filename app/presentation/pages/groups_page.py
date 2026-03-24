@@ -7,7 +7,6 @@ from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QLineEdit, QSpinBox, QComboBox, QDialogButtonBox
 )
 
-
 class GroupDialog(QDialog):
     """
     Диалог добавления/редактирования группы.

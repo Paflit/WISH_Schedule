@@ -1,4 +1,3 @@
-# app/presentation/widgets/schedule_grid.py
 """
 ScheduleGridWidget
 

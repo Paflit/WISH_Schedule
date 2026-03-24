@@ -33,7 +33,6 @@ from app.application.use_cases.apply_manual_edit import ApplyManualEditUseCase
 # Domain
 from app.domain.rules import DefaultRuleProfiles
 
-
 @dataclass(frozen=True)
 class Container:
     config: AppConfig

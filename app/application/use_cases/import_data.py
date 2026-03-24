@@ -1,4 +1,3 @@
-# app/application/use_cases/import_data.py
 """
 Use-case: импорт данных (справочников и учебного плана) из Excel/CSV.
 

@@ -1,4 +1,3 @@
-# app/presentation/viewmodels/generate_vm.py
 """
 GenerateViewModel
 

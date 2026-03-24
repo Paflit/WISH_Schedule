@@ -1,4 +1,3 @@
-# app/presentation/pages/calendar_page.py
 """
 CalendarPage
 

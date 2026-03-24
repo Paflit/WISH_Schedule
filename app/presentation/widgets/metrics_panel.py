@@ -1,4 +1,3 @@
-# app/presentation/widgets/metrics_panel.py
 """
 MetricsPanel
 

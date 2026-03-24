@@ -1,4 +1,3 @@
-# app/domain/rules.py
 """
 Правила (constraints) и профили оптимизации.
 

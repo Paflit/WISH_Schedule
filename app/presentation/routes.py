@@ -1,4 +1,3 @@
-# app/presentation/routes.py
 """
 Routes / Navigation registry.
 
