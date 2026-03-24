@@ -1,87 +1,104 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from pathlib import Path
 
+from app.application.use_cases.apply_manual_edit import ApplyManualEditUseCase
+from app.application.use_cases.generate_schedule import GenerateScheduleUseCase
 from app.config import AppConfig
-
-# Infrastructure
-from app.infrastructure.db.sqlite import create_engine_and_session_factory
 from app.infrastructure.db.repositories import (
-    SqliteTeachersRepository,
-    SqliteSubjectsRepository,
-    SqliteGroupsRepository,
-    SqliteRoomsRepository,
     SqliteCalendarRepository,
     SqliteCurriculumRepository,
+    SqliteGroupsRepository,
+    SqliteRoomsRepository,
     SqliteScheduleRepository,
+    SqliteSubjectsRepository,
+    SqliteTeachersRepository,
 )
-
-from app.infrastructure.import_export.excel_import import ExcelImportService
-from app.infrastructure.import_export.excel_export import ExcelExportService
-
+from app.infrastructure.db.sqlite import make_session_factory
 from app.infrastructure.optimizer.cp_sat_solver import CPSatScheduleSolver
 from app.infrastructure.optimizer.event_builder import EventBuilder
 
-# Application (use-cases)
-from app.application.use_cases.import_data import ImportDataUseCase
-from app.application.use_cases.export_data import ExportDataUseCase
-from app.application.use_cases.generate_schedule import GenerateScheduleUseCase
-from app.application.use_cases.save_variant import SaveVariantUseCase
-from app.application.use_cases.apply_manual_edit import ApplyManualEditUseCase
 
-# Domain
-from app.domain.rules import DefaultRuleProfiles
-
-@dataclass(frozen=True)
+@dataclass(slots=True)
 class Container:
     config: AppConfig
+    session_factory: object
 
-    # Repositories
-    teachers_repo: Any
-    subjects_repo: Any
-    groups_repo: Any
-    rooms_repo: Any
-    calendar_repo: Any
-    curriculum_repo: Any
-    schedule_repo: Any
+    teachers_repo: SqliteTeachersRepository
+    subjects_repo: SqliteSubjectsRepository
+    groups_repo: SqliteGroupsRepository
+    rooms_repo: SqliteRoomsRepository
+    calendar_repo: SqliteCalendarRepository
+    curriculum_repo: SqliteCurriculumRepository
+    schedule_repo: SqliteScheduleRepository
 
-    # Services
-    excel_import: ExcelImportService
-    excel_export: ExcelExportService
     event_builder: EventBuilder
     solver: CPSatScheduleSolver
 
-    # Use-cases
-    import_data_uc: ImportDataUseCase
-    export_data_uc: ExportDataUseCase
-    generate_schedule_uc: GenerateScheduleUseCase
-    save_variant_uc: SaveVariantUseCase
     apply_manual_edit_uc: ApplyManualEditUseCase
+    generate_schedule_uc: GenerateScheduleUseCase
 
-    # Domain profiles (weights presets)
-    rule_profiles: DefaultRuleProfiles
+    rule_profiles: dict
 
 
-def build_container() -> Container:
-    """
-    Собирает все зависимости приложения.
+def _load_rule_profiles() -> dict:
+    return {
+        "balanced": {
+            "teacher_hard_max_pairs": 6,
+            "teacher_soft_max_pairs": 4,
+            "allow_lunch_gap": True,
+            "lunch_gap_min_pair": 2,
+            "lunch_gap_max_pair": 3,
+            "allow_student_gaps": False,
+            "min_pairs_students_per_day": 2,
+            "max_pairs_students_per_day": 5,
+            "consider_method_day": True,
+            "w_teacher_over_soft": 700,
+            "w_teacher_gaps": 150,
+            "w_students_gaps": 600,
+            "w_students_day_load": 500,
+            "w_method_day": 250,
+            "w_lecture_late": 70,
+            "lecture_preferred_last_pair": 2,
+        }
+    }
 
-    Стратегия:
-    - AppConfig читает настройки (путь к БД и т.п.)
-    - создаём engine + session_factory (SQLite)
-    - создаём репозитории (каждый получает session_factory)
-    - создаём сервисы (solver, import/export, event_builder)
-    - создаём use-cases, передавая им порты (репозитории/сервисы)
-    """
 
-    # 1) Config
-    config = AppConfig.load()
+def _rule_profile_to_object(payload: dict):
+    class RuleProfile:
+        pass
 
-    # 2) DB core
-    engine, session_factory = create_engine_and_session_factory(config.db_url)
+    obj = RuleProfile()
+    for key, value in (payload or {}).items():
+        setattr(obj, key, value)
+    return obj
 
-    # 3) Repositories (SQLite implementations)
+
+def _build_rules_map() -> dict:
+    raw = _load_rule_profiles()
+    return {key: _rule_profile_to_object(value) for key, value in raw.items()}
+
+
+def _db_path_from_url(db_url: str) -> str:
+    if not db_url:
+        raise ValueError("config.db_url пуст.")
+
+    if not db_url.startswith("sqlite:///"):
+        raise ValueError(f"Поддерживается только sqlite:///..., получено: {db_url}")
+
+    return db_url.replace("sqlite:///", "", 1)
+
+
+def build_container(config: AppConfig | None = None) -> Container:
+    config = config or AppConfig.load()
+
+    db_path = Path(_db_path_from_url(config.db_url))
+    if db_path.parent and not db_path.parent.exists():
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    session_factory = make_session_factory(str(db_path))
+
     teachers_repo = SqliteTeachersRepository(session_factory)
     subjects_repo = SqliteSubjectsRepository(session_factory)
     groups_repo = SqliteGroupsRepository(session_factory)
@@ -89,54 +106,24 @@ def build_container() -> Container:
     calendar_repo = SqliteCalendarRepository(session_factory)
     curriculum_repo = SqliteCurriculumRepository(session_factory)
     schedule_repo = SqliteScheduleRepository(session_factory)
-    calendar_repo.ensure_default_calendar(
-        academic_year="2025/2026",
-        include_saturday=True,
-        pairs_per_day=8,
-    )
-
-    # пересобираем weekly plan для уже существующих semester plans
-    curriculum_repo.rebuild_all_weekly_plans()
-
-    # 4) Domain profiles (готовые наборы весов/правил для UI)
-    rule_profiles = DefaultRuleProfiles()
-
-    # 5) Infrastructure services
-    excel_import = ExcelImportService(
-        teachers_repo=teachers_repo,
-        subjects_repo=subjects_repo,
-        groups_repo=groups_repo,
-        rooms_repo=rooms_repo,
-        calendar_repo=calendar_repo,
-        curriculum_repo=curriculum_repo,
-    )
-
-    excel_export = ExcelExportService(
-        teachers_repo=teachers_repo,
-        subjects_repo=subjects_repo,
-        groups_repo=groups_repo,
-        rooms_repo=rooms_repo,
-        calendar_repo=calendar_repo,
-        curriculum_repo=curriculum_repo,
-        schedule_repo=schedule_repo,
-    )
 
     event_builder = EventBuilder(
         curriculum_repo=curriculum_repo,
         calendar_repo=calendar_repo,
         groups_repo=groups_repo,
         rooms_repo=rooms_repo,
+        rules_repo=None,
     )
-
     solver = CPSatScheduleSolver()
 
-    # 6) Use-cases
-    import_data_uc = ImportDataUseCase(
-        excel_import=excel_import
-    )
+    rule_profiles = _build_rules_map()
 
-    export_data_uc = ExportDataUseCase(
-        excel_export=excel_export
+    apply_manual_edit_uc = ApplyManualEditUseCase(
+        schedule_repo=schedule_repo,
+        teachers_repo=teachers_repo,
+        groups_repo=groups_repo,
+        rooms_repo=rooms_repo,
+        calendar_repo=calendar_repo,
     )
 
     generate_schedule_uc = GenerateScheduleUseCase(
@@ -153,20 +140,9 @@ def build_container() -> Container:
         config=config,
     )
 
-    save_variant_uc = SaveVariantUseCase(
-        schedule_repo=schedule_repo
-    )
-
-    apply_manual_edit_uc = ApplyManualEditUseCase(
-        schedule_repo=schedule_repo,
-        teachers_repo=teachers_repo,
-        rooms_repo=rooms_repo,
-        calendar_repo=calendar_repo,
-    )
-
     return Container(
         config=config,
-
+        session_factory=session_factory,
         teachers_repo=teachers_repo,
         subjects_repo=subjects_repo,
         groups_repo=groups_repo,
@@ -174,17 +150,9 @@ def build_container() -> Container:
         calendar_repo=calendar_repo,
         curriculum_repo=curriculum_repo,
         schedule_repo=schedule_repo,
-
-        excel_import=excel_import,
-        excel_export=excel_export,
         event_builder=event_builder,
         solver=solver,
-
-        import_data_uc=import_data_uc,
-        export_data_uc=export_data_uc,
-        generate_schedule_uc=generate_schedule_uc,
-        save_variant_uc=save_variant_uc,
         apply_manual_edit_uc=apply_manual_edit_uc,
-
+        generate_schedule_uc=generate_schedule_uc,
         rule_profiles=rule_profiles,
     )

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
+
+from app.domain.exceptions import ValidationError
 
 
 @dataclass(frozen=True)
@@ -27,12 +29,18 @@ class EventBuilder:
     """
     Построитель событий генерации.
 
+    Единица генерации = одна учебная пара, которую solver должен поставить в сетку.
+
     Основные принципы:
-    - строим события из semester plan + weekly plan
-    - учитываем реальный week_number_in_semester, если он задан
-    - не создаём пустые/нулевые события
-    - лекции можно объединять между группами, но только если суммарный размер
-      влезает хотя бы в одну подходящую аудиторию
+    - строим события из semester plan + weekly plan;
+    - используем week_number_in_semester / week_type, если они реально есть;
+    - не создаём пустые события;
+    - лекции можно объединять между группами, но только:
+        * если это одна и та же дисциплина;
+        * если совпадает тип занятия и тип аудитории;
+        * если совпадает неделя / тип недели;
+        * если суммарный размер групп влезает в хотя бы одну подходящую аудиторию;
+        * если события не затронуты lock-ами.
     """
 
     def __init__(self, curriculum_repo, calendar_repo, groups_repo, rooms_repo, rules_repo=None):
@@ -45,90 +53,176 @@ class EventBuilder:
     # ---------------------------------------------------------
     # Public
     # ---------------------------------------------------------
-
     def build_events(
         self,
         calendar_id: int,
         hours_per_pair: int,
         locks: Optional[list] = None,
     ) -> List[object]:
-        if int(hours_per_pair) <= 0:
-            raise ValueError("hours_per_pair must be > 0")
+        calendar_id = int(calendar_id)
+        hours_per_pair = int(hours_per_pair)
 
-        # lock hints пока только нормализуем и держим для совместимости
-        lock_map: Dict[int, LockHint] = {}
-        if locks:
-            for lk in locks:
-                event_id = getattr(lk, "event_id", None)
-                if event_id is None:
-                    continue
-                lock_map[int(event_id)] = LockHint(
-                    event_id=int(event_id),
-                    slot_id=getattr(lk, "slot_id", None),
-                    teacher_id=getattr(lk, "teacher_id", None),
-                    room_id=getattr(lk, "room_id", None),
-                )
+        if calendar_id <= 0:
+            raise ValidationError("calendar_id должен быть положительным числом.")
+        if hours_per_pair <= 0:
+            raise ValidationError("hours_per_pair должен быть больше 0.")
 
-        # 1) semester plans выбранного полугодия
-        plans = self._curriculum_repo.get_semester_plans(calendar_id)
-        plans = [p for p in plans if int(getattr(p, "hours_in_semester", 0) or 0) > 0]
+        lock_map = self._normalize_locks(locks)
+
+        plans = self._load_semester_plans(calendar_id)
         if not plans:
             return []
 
-        # 2) curriculum items
         curriculum_items = self._curriculum_repo.get_curriculum_items_for_plans(plans)
         if not curriculum_items:
             return []
 
-        # 3) weekly plan
-        weekly_rows = self._curriculum_repo.get_weekly_plans(calendar_id)
-        weekly_rows = [w for w in weekly_rows if self._is_valid_weekly_row(w)]
+        weekly_rows = self._load_weekly_rows(calendar_id)
+        weekly_by_plan_id = self._group_weekly_rows_by_plan(weekly_rows)
 
-        weekly_by_plan_id: Dict[int, List[object]] = {}
-        for w in weekly_rows:
-            weekly_by_plan_id.setdefault(int(w.plan_id), []).append(w)
+        atomic_events = self._build_atomic_events(
+            plans=plans,
+            curriculum_items=curriculum_items,
+            weekly_by_plan_id=weekly_by_plan_id,
+            hours_per_pair=hours_per_pair,
+        )
+        if not atomic_events:
+            return []
 
-        # Чтобы weekly rows были стабильны по неделе
-        for plan_id, rows in weekly_by_plan_id.items():
-            rows.sort(
-                key=lambda w: (
-                    int(getattr(w, "week_number_in_semester", 0) or 0),
-                    int(getattr(w, "week_type", 0) or 0),
-                    int(getattr(w, "week_id", 0) or 0),
-                )
-            )
+        final_events = self._merge_lecture_events_with_capacity(
+            events=atomic_events,
+            lock_map=lock_map,
+        )
+        if not final_events:
+            return []
 
-        # 4) строим атомарные события
-        atomic_events: List[SimpleNamespace] = []
-        next_event_id = 1
+        return self._finalize_events(final_events)
 
-        for plan in plans:
-            curriculum_id = int(plan.curriculum_id)
-            item = curriculum_items.get(curriculum_id)
-            if item is None:
+    # ---------------------------------------------------------
+    # Loaders / validators
+    # ---------------------------------------------------------
+    def _normalize_locks(self, locks: Optional[list]) -> Dict[int, LockHint]:
+        result: Dict[int, LockHint] = {}
+        if not locks:
+            return result
+
+        for lk in locks:
+            event_id = getattr(lk, "event_id", None)
+            if event_id is None:
                 continue
 
-            plan_id = int(plan.id_plan)
-            plan_weekly_rows = weekly_by_plan_id.get(plan_id, [])
+            try:
+                event_id = int(event_id)
+            except (TypeError, ValueError):
+                continue
 
-            if plan_weekly_rows:
-                for w in plan_weekly_rows:
-                    hours_this_week = int(getattr(w, "hours_this_week", 0) or 0)
+            if event_id <= 0:
+                continue
 
-                    # только полные пары
-                    event_count = hours_this_week // int(hours_per_pair)
-                    if event_count <= 0:
+            result[event_id] = LockHint(
+                event_id=event_id,
+                slot_id=self._optional_int(getattr(lk, "slot_id", None)),
+                teacher_id=self._optional_int(getattr(lk, "teacher_id", None)),
+                room_id=self._optional_int(getattr(lk, "room_id", None)),
+            )
+        return result
+
+    def _load_semester_plans(self, calendar_id: int) -> List[object]:
+        plans = self._curriculum_repo.get_semester_plans(calendar_id)
+        plans = [
+            p
+            for p in plans
+            if self._positive_int(getattr(p, "hours_in_semester", 0)) > 0
+        ]
+        return sorted(
+            plans,
+            key=lambda p: (
+                self._positive_int(getattr(p, "id_plan", 0)),
+                self._positive_int(getattr(p, "curriculum_id", 0)),
+            ),
+        )
+
+    def _load_weekly_rows(self, calendar_id: int) -> List[object]:
+        weekly_rows = self._curriculum_repo.get_weekly_plans(calendar_id)
+        weekly_rows = [w for w in weekly_rows if self._is_valid_weekly_row(w)]
+        return sorted(
+            weekly_rows,
+            key=lambda w: (
+                self._positive_int(getattr(w, "plan_id", 0)),
+                self._normalize_week_number(getattr(w, "week_number_in_semester", None)) or 0,
+                self._normalize_week_type(getattr(w, "week_type", None)) or 0,
+                self._positive_int(getattr(w, "week_id", 0)),
+                self._positive_int(getattr(w, "id_week_plan", 0)),
+            ),
+        )
+
+    def _group_weekly_rows_by_plan(self, weekly_rows: Iterable[object]) -> Dict[int, List[object]]:
+        weekly_by_plan_id: Dict[int, List[object]] = {}
+        for row in weekly_rows:
+            plan_id = self._positive_int(getattr(row, "plan_id", 0))
+            if plan_id <= 0:
+                continue
+            weekly_by_plan_id.setdefault(plan_id, []).append(row)
+        return weekly_by_plan_id
+
+    def _is_valid_weekly_row(self, row) -> bool:
+        if self._positive_int(getattr(row, "hours_this_week", 0)) <= 0:
+            return False
+
+        is_study_week = getattr(row, "is_study_week", 1)
+        if is_study_week is not None:
+            try:
+                if int(is_study_week) == 0:
+                    return False
+            except (TypeError, ValueError):
+                pass
+
+        return True
+
+    # ---------------------------------------------------------
+    # Atomic events
+    # ---------------------------------------------------------
+    def _build_atomic_events(
+        self,
+        *,
+        plans: List[object],
+        curriculum_items: Dict[int, object],
+        weekly_by_plan_id: Dict[int, List[object]],
+        hours_per_pair: int,
+    ) -> List[SimpleNamespace]:
+        events: List[SimpleNamespace] = []
+        next_event_id = 1
+
+        missing_curriculum_ids: List[int] = []
+
+        for plan in plans:
+            plan_id = self._positive_int(getattr(plan, "id_plan", 0))
+            curriculum_id = self._positive_int(getattr(plan, "curriculum_id", 0))
+
+            item = curriculum_items.get(curriculum_id)
+            if item is None:
+                missing_curriculum_ids.append(curriculum_id)
+                continue
+
+            weekly_rows = weekly_by_plan_id.get(plan_id, [])
+            if weekly_rows:
+                for weekly_row in weekly_rows:
+                    hours_this_week = self._positive_int(
+                        getattr(weekly_row, "hours_this_week", 0)
+                    )
+                    pairs_count = hours_this_week // hours_per_pair
+                    if pairs_count <= 0:
                         continue
 
                     fixed_week_number = self._normalize_week_number(
-                        getattr(w, "week_number_in_semester", None)
+                        getattr(weekly_row, "week_number_in_semester", None)
                     )
                     fixed_week_type = self._normalize_week_type(
-                        getattr(w, "week_type", None)
+                        getattr(weekly_row, "week_type", None)
                     )
 
-                    for _ in range(event_count):
-                        atomic_events.append(
+                    for _ in range(pairs_count):
+                        events.append(
                             self._make_atomic_event(
                                 event_id=next_event_id,
                                 item=item,
@@ -138,14 +232,13 @@ class EventBuilder:
                         )
                         next_event_id += 1
             else:
-                # fallback: если weekly plan ещё не построен, строим без привязки к неделе
-                total_hours = int(getattr(plan, "hours_in_semester", 0) or 0)
-                event_count = total_hours // int(hours_per_pair)
-                if event_count <= 0:
+                total_hours = self._positive_int(getattr(plan, "hours_in_semester", 0))
+                pairs_count = total_hours // hours_per_pair
+                if pairs_count <= 0:
                     continue
 
-                for _ in range(event_count):
-                    atomic_events.append(
+                for _ in range(pairs_count):
+                    events.append(
                         self._make_atomic_event(
                             event_id=next_event_id,
                             item=item,
@@ -155,202 +248,345 @@ class EventBuilder:
                     )
                     next_event_id += 1
 
-        if not atomic_events:
-            return []
-
-        # 5) объединяем лекции с учётом вместимости аудиторий
-        merged_events = self._merge_lecture_events_with_capacity(atomic_events)
-
-        # 6) перенумерация для компактного финального набора
-        final_events: List[SimpleNamespace] = []
-        for idx, e in enumerate(merged_events, start=1):
-            final_events.append(
-                SimpleNamespace(
-                    id_event=idx,
-                    curriculum_id=int(e.curriculum_id),
-                    curriculum_ids=list(e.curriculum_ids),
-                    group_id=int(e.group_id),
-                    group_ids=list(e.group_ids),
-                    subject_id=int(e.subject_id),
-                    part_type=str(e.part_type),
-                    required_room_type=str(e.required_room_type),
-                    fixed_week_number=self._normalize_week_number(
-                        getattr(e, "fixed_week_number", None)
-                    ),
-                    fixed_week_type=self._normalize_week_type(
-                        getattr(e, "fixed_week_type", None)
-                    ),
-                    merged=bool(getattr(e, "merged", False)),
-                )
+        if missing_curriculum_ids and not events:
+            missing_str = ", ".join(str(x) for x in sorted(set(missing_curriculum_ids))[:10])
+            raise ValidationError(
+                f"Не удалось построить события: отсутствуют CurriculumItems для curriculum_id: {missing_str}."
             )
 
-        return final_events
-
-    # ---------------------------------------------------------
-    # Internal
-    # ---------------------------------------------------------
-
-    def _is_valid_weekly_row(self, row) -> bool:
-        if int(getattr(row, "hours_this_week", 0) or 0) <= 0:
-            return False
-
-        is_study_week = getattr(row, "is_study_week", 1)
-        if is_study_week is not None and int(is_study_week) == 0:
-            return False
-
-        return True
-
-    def _normalize_week_number(self, value) -> Optional[int]:
-        if value is None:
-            return None
-        n = int(value or 0)
-        return n if n > 0 else None
-
-    def _normalize_week_type(self, value) -> Optional[int]:
-        if value is None:
-            return None
-        n = int(value or 0)
-        return n if n in (1, 2) else None
+        return events
 
     def _make_atomic_event(
         self,
+        *,
         event_id: int,
         item,
         fixed_week_number: Optional[int],
         fixed_week_type: Optional[int],
     ) -> SimpleNamespace:
+        curriculum_id = self._positive_int(getattr(item, "id_curriculum", 0))
+        group_id = self._positive_int(getattr(item, "group_id", 0))
+        subject_id = self._positive_int(getattr(item, "subject_id", 0))
+        part_type = str(getattr(item, "part_type", "") or "").strip()
+        required_room_type = str(getattr(item, "required_room_type", "") or "").strip()
+
+        if curriculum_id <= 0:
+            raise ValidationError("CurriculumItem содержит некорректный id_curriculum.")
+        if group_id <= 0:
+            raise ValidationError(f"CurriculumItem id={curriculum_id} содержит некорректный group_id.")
+        if subject_id <= 0:
+            raise ValidationError(f"CurriculumItem id={curriculum_id} содержит некорректный subject_id.")
+        if not part_type:
+            raise ValidationError(f"CurriculumItem id={curriculum_id} не содержит part_type.")
+        if not required_room_type:
+            raise ValidationError(
+                f"CurriculumItem id={curriculum_id} не содержит required_room_type."
+            )
+
         return SimpleNamespace(
             id_event=int(event_id),
-            curriculum_id=int(item.id_curriculum),
-            curriculum_ids=[int(item.id_curriculum)],
-            group_id=int(item.group_id),
-            group_ids=[int(item.group_id)],
-            subject_id=int(item.subject_id),
-            part_type=str(item.part_type),
-            required_room_type=str(item.required_room_type),
+            curriculum_id=curriculum_id,
+            curriculum_ids=[curriculum_id],
+            group_id=group_id,
+            group_ids=[group_id],
+            subject_id=subject_id,
+            part_type=part_type,
+            required_room_type=required_room_type,
             fixed_week_number=fixed_week_number,
             fixed_week_type=fixed_week_type,
             merged=False,
+            source_event_ids=[int(event_id)],
         )
+
+    # ---------------------------------------------------------
+    # Merge lectures
+    # ---------------------------------------------------------
+    def _group_sizes(self) -> Dict[int, int]:
+        groups = self._groups_repo.list_all()
+        result: Dict[int, int] = {}
+        for g in groups:
+            gid = self._positive_int(getattr(g, "id_group", 0))
+            qty = self._positive_int(getattr(g, "quantity", 0))
+            if gid > 0:
+                result[gid] = max(0, qty)
+        return result
 
     def _max_capacity_for_required_type(self, required_room_type: str) -> int:
         rooms = self._rooms_repo.list_all()
-        caps = [
-            int(r.capacity)
+        capacities = [
+            self._positive_int(getattr(r, "capacity", 0))
             for r in rooms
             if _room_matches_required(r, required_room_type)
         ]
-        return max(caps) if caps else 0
+        capacities = [c for c in capacities if c > 0]
+        return max(capacities) if capacities else 0
 
-    def _group_sizes(self) -> Dict[int, int]:
-        groups = self._groups_repo.list_all()
-        return {int(g.id_group): int(g.quantity) for g in groups}
+    def _is_locked_event(self, event_id: int, lock_map: Dict[int, LockHint]) -> bool:
+        return int(event_id) in lock_map
 
-    def _merge_lecture_events_with_capacity(self, events: List[SimpleNamespace]) -> List[SimpleNamespace]:
+    def _merge_lecture_events_with_capacity(
+        self,
+        *,
+        events: List[SimpleNamespace],
+        lock_map: Dict[int, LockHint],
+    ) -> List[SimpleNamespace]:
         """
-        Объединяем lecture-события по:
-        - subject_id
-        - part_type
-        - required_room_type
-        - fixed_week_number
-        - fixed_week_type
+        Объединяем только lecture-события и только если это безопасно.
 
-        Но каждую пачку групп ограничиваем реальной максимальной вместимостью
-        подходящей аудитории.
+        Не объединяем:
+        - не lecture;
+        - события с lock;
+        - события без подходящей аудитории;
+        - события, которые не влезают суммарно по capacity.
         """
         lecture_groups: Dict[Tuple, List[SimpleNamespace]] = {}
-        non_lecture: List[SimpleNamespace] = []
+        passthrough: List[SimpleNamespace] = []
 
-        for e in events:
-            if str(e.part_type) != "lecture":
-                non_lecture.append(e)
+        for event in events:
+            if str(getattr(event, "part_type", "")) != "lecture":
+                passthrough.append(event)
+                continue
+
+            if self._is_locked_event(getattr(event, "id_event", 0), lock_map):
+                passthrough.append(event)
                 continue
 
             key = (
-                int(e.subject_id),
-                str(e.part_type),
-                str(e.required_room_type),
-                self._normalize_week_number(getattr(e, "fixed_week_number", None)),
-                self._normalize_week_type(getattr(e, "fixed_week_type", None)),
+                self._positive_int(getattr(event, "subject_id", 0)),
+                str(getattr(event, "part_type", "")).strip(),
+                str(getattr(event, "required_room_type", "")).strip(),
+                self._normalize_week_number(getattr(event, "fixed_week_number", None)),
+                self._normalize_week_type(getattr(event, "fixed_week_type", None)),
             )
-            lecture_groups.setdefault(key, []).append(e)
+            lecture_groups.setdefault(key, []).append(event)
 
         group_sizes = self._group_sizes()
-        merged: List[SimpleNamespace] = []
+        merged_events: List[SimpleNamespace] = []
 
         for _key, items in lecture_groups.items():
             if not items:
                 continue
 
-            required_room_type = str(items[0].required_room_type)
-            max_cap = self._max_capacity_for_required_type(required_room_type)
+            required_room_type = str(getattr(items[0], "required_room_type", "")).strip()
+            max_capacity = self._max_capacity_for_required_type(required_room_type)
 
-            # Если вообще нет подходящей аудитории, не объединяем
-            if max_cap <= 0:
-                merged.extend(items)
+            if max_capacity <= 0:
+                passthrough.extend(items)
                 continue
 
-            # Сначала большие группы — это даёт более устойчивую упаковку
             items = sorted(
                 items,
-                key=lambda x: (-group_sizes.get(int(x.group_id), 0), int(x.group_id))
+                key=lambda x: (
+                    -group_sizes.get(self._positive_int(getattr(x, "group_id", 0)), 0),
+                    self._positive_int(getattr(x, "group_id", 0)),
+                    self._positive_int(getattr(x, "id_event", 0)),
+                ),
             )
 
             batches: List[List[SimpleNamespace]] = []
 
-            for it in items:
-                gsize = int(group_sizes.get(int(it.group_id), 0))
-                placed = False
+            for item in items:
+                item_group_id = self._positive_int(getattr(item, "group_id", 0))
+                item_group_size = group_sizes.get(item_group_id, 0)
 
+                placed = False
                 for batch in batches:
-                    current_size = sum(group_sizes.get(int(x.group_id), 0) for x in batch)
-                    if current_size + gsize <= max_cap:
-                        batch.append(it)
+                    current_size = sum(
+                        group_sizes.get(
+                            self._positive_int(getattr(batch_item, "group_id", 0)),
+                            0,
+                        )
+                        for batch_item in batch
+                    )
+                    if current_size + item_group_size <= max_capacity:
+                        batch.append(item)
                         placed = True
                         break
 
                 if not placed:
-                    batches.append([it])
+                    batches.append([item])
 
             for batch in batches:
+                if len(batch) == 1:
+                    merged_events.append(batch[0])
+                    continue
+
                 group_ids: List[int] = []
                 curriculum_ids: List[int] = []
+                source_event_ids: List[int] = []
 
-                for it in batch:
-                    group_ids.extend(int(x) for x in list(it.group_ids))
-                    curriculum_ids.extend(int(x) for x in list(it.curriculum_ids))
+                for item in batch:
+                    group_ids.extend(
+                        self._positive_int(x)
+                        for x in list(getattr(item, "group_ids", []) or [])
+                        if self._positive_int(x) > 0
+                    )
+                    curriculum_ids.extend(
+                        self._positive_int(x)
+                        for x in list(getattr(item, "curriculum_ids", []) or [])
+                        if self._positive_int(x) > 0
+                    )
+                    source_event_ids.extend(
+                        self._positive_int(x)
+                        for x in list(getattr(item, "source_event_ids", []) or [])
+                        if self._positive_int(x) > 0
+                    )
 
                 group_ids = list(dict.fromkeys(group_ids))
                 curriculum_ids = list(dict.fromkeys(curriculum_ids))
+                source_event_ids = list(dict.fromkeys(source_event_ids))
 
-                merged.append(
+                anchor_event_id = min(source_event_ids) if source_event_ids else 0
+                anchor_curriculum_id = curriculum_ids[0] if curriculum_ids else 0
+                anchor_group_id = group_ids[0] if group_ids else 0
+
+                merged_events.append(
                     SimpleNamespace(
-                        id_event=0,
-                        curriculum_id=int(curriculum_ids[0]),
+                        id_event=anchor_event_id,
+                        curriculum_id=anchor_curriculum_id,
                         curriculum_ids=curriculum_ids,
-                        group_id=int(group_ids[0]),
+                        group_id=anchor_group_id,
                         group_ids=group_ids,
-                        subject_id=int(batch[0].subject_id),
+                        subject_id=self._positive_int(getattr(batch[0], "subject_id", 0)),
                         part_type="lecture",
-                        required_room_type=str(batch[0].required_room_type),
+                        required_room_type=str(
+                            getattr(batch[0], "required_room_type", "") or ""
+                        ).strip(),
                         fixed_week_number=self._normalize_week_number(
                             getattr(batch[0], "fixed_week_number", None)
                         ),
                         fixed_week_type=self._normalize_week_type(
                             getattr(batch[0], "fixed_week_type", None)
                         ),
-                        merged=(len(group_ids) > 1),
+                        merged=True,
+                        source_event_ids=source_event_ids,
                     )
                 )
 
-        result = merged + non_lecture
+        result = merged_events + passthrough
         result.sort(
             key=lambda e: (
-                str(e.part_type),
-                int(e.subject_id),
-                tuple(int(x) for x in e.group_ids),
-                -1 if getattr(e, "fixed_week_type", None) is None else int(e.fixed_week_type),
-                -1 if getattr(e, "fixed_week_number", None) is None else int(e.fixed_week_number),
+                self._positive_int(getattr(e, "id_event", 0)),
+                str(getattr(e, "part_type", "")),
+                self._positive_int(getattr(e, "subject_id", 0)),
+                tuple(
+                    self._positive_int(x)
+                    for x in list(getattr(e, "group_ids", []) or [])
+                    if self._positive_int(x) > 0
+                ),
+                self._normalize_week_type(getattr(e, "fixed_week_type", None)) or 0,
+                self._normalize_week_number(getattr(e, "fixed_week_number", None)) or 0,
             )
         )
         return result
+
+    # ---------------------------------------------------------
+    # Final shape
+    # ---------------------------------------------------------
+    def _finalize_events(self, events: List[SimpleNamespace]) -> List[SimpleNamespace]:
+        """
+        Возвращаем компактный, но стабильный набор событий.
+
+        Важно:
+        - сохраняем id_event детерминированным;
+        - не перенумеровываем после merge подряд 1..N,
+          чтобы не ломать возможную привязку lock-ов к исходным событиям.
+        """
+        final_events: List[SimpleNamespace] = []
+
+        seen_ids: set[int] = set()
+        next_fallback_id = 1
+
+        for event in events:
+            event_id = self._positive_int(getattr(event, "id_event", 0))
+            if event_id <= 0 or event_id in seen_ids:
+                while next_fallback_id in seen_ids:
+                    next_fallback_id += 1
+                event_id = next_fallback_id
+                next_fallback_id += 1
+
+            seen_ids.add(event_id)
+
+            final_events.append(
+                SimpleNamespace(
+                    id_event=event_id,
+                    curriculum_id=self._positive_int(getattr(event, "curriculum_id", 0)),
+                    curriculum_ids=list(
+                        dict.fromkeys(
+                            self._positive_int(x)
+                            for x in list(getattr(event, "curriculum_ids", []) or [])
+                            if self._positive_int(x) > 0
+                        )
+                    ),
+                    group_id=self._positive_int(getattr(event, "group_id", 0)),
+                    group_ids=list(
+                        dict.fromkeys(
+                            self._positive_int(x)
+                            for x in list(getattr(event, "group_ids", []) or [])
+                            if self._positive_int(x) > 0
+                        )
+                    ),
+                    subject_id=self._positive_int(getattr(event, "subject_id", 0)),
+                    part_type=str(getattr(event, "part_type", "") or "").strip(),
+                    required_room_type=str(
+                        getattr(event, "required_room_type", "") or ""
+                    ).strip(),
+                    fixed_week_number=self._normalize_week_number(
+                        getattr(event, "fixed_week_number", None)
+                    ),
+                    fixed_week_type=self._normalize_week_type(
+                        getattr(event, "fixed_week_type", None)
+                    ),
+                    merged=bool(getattr(event, "merged", False)),
+                    source_event_ids=list(
+                        dict.fromkeys(
+                            self._positive_int(x)
+                            for x in list(getattr(event, "source_event_ids", []) or [])
+                            if self._positive_int(x) > 0
+                        )
+                    ),
+                )
+            )
+
+        return final_events
+
+    # ---------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------
+    @staticmethod
+    def _positive_int(value, default: int = 0) -> int:
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            return int(default)
+        return result
+
+    @staticmethod
+    def _optional_int(value) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            return None
+        return result if result > 0 else None
+
+    @staticmethod
+    def _normalize_week_number(value) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    @staticmethod
+    def _normalize_week_type(value) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            return None
+        return n if n in (1, 2) else None

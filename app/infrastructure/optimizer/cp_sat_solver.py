@@ -1,44 +1,99 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional, DefaultDict
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
 
 from ortools.sat.python import cp_model
 
+from app.domain.exceptions import SolverError, ValidationError
 from app.domain.models import (
-    Teacher,
-    StudentGroup,
-    Room,
-    TimeSlot,
     CurriculumItem,
+    Room,
     Solution,
     SolutionEntry,
+    StudentGroup,
+    Teacher,
+    TimeSlot,
 )
 from app.domain.rules import SchedulingRules
 
-
 # ============================================================
-# Helpers
+# Константы и helpers
 # ============================================================
 
 MAX_ROOMS_PER_EVENT = 8
 MAX_SLOTS_PER_EVENT = 32
 
 
+def _positive_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _optional_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _parse_room_types(room_type: str | None) -> set[str]:
+    if not room_type:
+        return set()
+    return {x.strip() for x in str(room_type).split(",") if x.strip()}
+
+
+def _room_matches_required(room: Room, required_room_type: str) -> bool:
+    return required_room_type in _parse_room_types(getattr(room, "room_type", ""))
+
+
+def _room_priority_penalty(room: Room, required_room_type: str) -> int:
+    """
+    Меньше — лучше.
+    Штрафуем за перерасход ресурса аудитории.
+    """
+    room_types = _parse_room_types(getattr(room, "room_type", ""))
+    if required_room_type not in room_types:
+        return 10_000
+
+    resource_rank = {
+        "computer": 4,
+        "lecture": 3,
+        "lab": 2,
+        "classroom": 1,
+    }
+
+    highest_room_rank = max((resource_rank.get(t, 0) for t in room_types), default=0)
+    required_rank = resource_rank.get(required_room_type, 0)
+    return max(0, highest_room_rank - required_rank)
+
+
 def _day_key(slot: TimeSlot) -> Tuple[int, int]:
     """
-    Для ежедневных штрафов опираемся прежде всего на week_type + day_of_week.
+    Основа day-key:
+    - week_type
+    - day_of_week
 
-    week_number_in_semester в текущем проекте используется непоследовательно:
-    в части репозиториев/слотов он фактически всегда 0, а weekly model живёт
-    в основном через week_type. Поэтому для устойчивости solver не делает
-    day-key зависимым от week_number_in_semester.
+    week_number_in_semester используем отдельно только когда событие
+    жёстко привязано к конкретной неделе.
     """
-    return (int(slot.week_type), int(slot.day_of_week))
+    return (
+        _positive_int(getattr(slot, "week_type", 0)),
+        _positive_int(getattr(slot, "day_of_week", 0)),
+    )
 
 
-def _or_bool(model: cp_model.CpModel, lits: List[cp_model.IntVar], name: str) -> cp_model.IntVar:
+def _or_bool(
+    model: cp_model.CpModel,
+    lits: List[cp_model.IntVar],
+    name: str,
+) -> cp_model.IntVar:
     b = model.NewBoolVar(name)
     if not lits:
         model.Add(b == 0)
@@ -58,10 +113,7 @@ def _gaps_for_day(
 ) -> cp_model.IntVar:
     y: List[cp_model.IntVar] = []
     for p in range(1, max_pair + 1):
-        if p in occupied_by_pair:
-            y.append(occupied_by_pair[p])
-        else:
-            y.append(model.NewConstant(0))
+        y.append(occupied_by_pair.get(p, model.NewConstant(0)))
 
     before_any: Dict[int, cp_model.IntVar] = {}
     after_any: Dict[int, cp_model.IntVar] = {}
@@ -71,7 +123,6 @@ def _gaps_for_day(
         after_any[p] = _or_bool(model, y[p:], f"{name_prefix}_after_{p}")
 
     gap_vars: List[cp_model.IntVar] = []
-
     for p in range(1, max_pair + 1):
         if allow_lunch_gap and lunch_min <= p <= lunch_max:
             continue
@@ -94,45 +145,6 @@ def _gaps_for_day(
     return gaps
 
 
-def _parse_room_types(room_type: str | None) -> set[str]:
-    if not room_type:
-        return set()
-    return {x.strip() for x in str(room_type).split(",") if x.strip()}
-
-
-def _room_matches_required(room: Room, required_room_type: str) -> bool:
-    room_types = _parse_room_types(room.room_type)
-    return required_room_type in room_types
-
-
-def _room_priority_penalty(room: Room, required_room_type: str) -> int:
-    """
-    Меньше — лучше.
-
-    Приоритет ресурса аудитории:
-      computer > lecture > lab > classroom
-
-    Если событию требуется менее "ценный" тип, но аудитория содержит
-    более ценный тип, начисляем штраф за перерасход ресурса.
-    """
-    room_types = _parse_room_types(room.room_type)
-
-    if required_room_type not in room_types:
-        return 10_000
-
-    resource_rank = {
-        "computer": 4,
-        "lecture": 3,
-        "lab": 2,
-        "classroom": 1,
-    }
-
-    highest_room_rank = max((resource_rank.get(t, 0) for t in room_types), default=0)
-    required_rank = resource_rank.get(required_room_type, 0)
-
-    return max(0, highest_room_rank - required_rank)
-
-
 @dataclass(frozen=True)
 class ScheduleLock:
     event_id: int
@@ -141,19 +153,77 @@ class ScheduleLock:
     room_id: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class FeasibilityIssue:
+    event_id: int
+    reason: str
+    subject_id: int
+    part_type: str
+    group_ids: Tuple[int, ...]
+    candidate_teachers: int
+    candidate_rooms: int
+    candidate_slots: int
+
+
+class _SolutionCollector(cp_model.CpSolverSolutionCallback):
+    def __init__(
+        self,
+        x_vars: Dict[Tuple[int, int], cp_model.IntVar],
+        event_options: Dict[int, List[Tuple[int, int, int, int]]],
+        k_solutions: int,
+    ):
+        super().__init__()
+        self._x_vars = x_vars
+        self._event_options = event_options
+        self._k_solutions = max(1, int(k_solutions))
+        self.solutions: List[Solution] = []
+
+    def on_solution_callback(self) -> None:
+        entries: List[SolutionEntry] = []
+
+        for eid, options in self._event_options.items():
+            for idx, (slot_id, teacher_id, room_id, _room_penalty) in enumerate(options):
+                var = self._x_vars[(eid, idx)]
+                if self.Value(var):
+                    entries.append(
+                        SolutionEntry(
+                            event_id=int(eid),
+                            slot_id=int(slot_id),
+                            teacher_id=int(teacher_id),
+                            room_id=int(room_id),
+                        )
+                    )
+                    break
+
+        self.solutions.append(
+            Solution(
+                entries=entries,
+                objective_value=int(self.ObjectiveValue()),
+                meta={"status": "feasible"},
+            )
+        )
+
+        if len(self.solutions) >= self._k_solutions:
+            self.StopSearch()
+
+
 # ============================================================
 # Solver
 # ============================================================
+
 
 class CPSatScheduleSolver:
     """
     Solver на OR-Tools CP-SAT.
 
-    Улучшения по сравнению с прежней версией:
-    - меньше служебных переменных
-    - меньше повторных проходов по всем options
-    - ограничение числа комнат/слотов на событие
-    - более устойчивая работа с weekly model
+    Вход:
+    - events: generation events, построенные EventBuilder
+    - curriculum: dict[curriculum_id] -> CurriculumItem
+    - teacher_subjects: {(teacher_id, subject_id, part_type): bool}
+    - teacher_availability: {(teacher_id, slot_id): bool}
+
+    Выход:
+    - список Solution, где каждый Solution содержит назначения event -> slot/teacher/room
     """
 
     def solve(
@@ -175,386 +245,718 @@ class CPSatScheduleSolver:
         if not events:
             return []
 
+        if not teachers:
+            raise ValidationError("Solver: список преподавателей пуст.")
+        if not groups:
+            raise ValidationError("Solver: список групп пуст.")
+        if not rooms:
+            raise ValidationError("Solver: список аудиторий пуст.")
+        if not slots:
+            raise ValidationError("Solver: список временных слотов пуст.")
+        if not curriculum:
+            raise ValidationError("Solver: curriculum map пуст.")
+
+        k_solutions = max(1, _positive_int(k_solutions, 1))
+        time_limit_seconds = max(1, _positive_int(time_limit_seconds, 30))
+        random_seed = max(1, _positive_int(random_seed, 1))
+
         slot_by_id = {int(s.id_slot): s for s in slots}
         group_by_id = {int(g.id_group): g for g in groups}
-        max_pair = max((int(s.pair_number) for s in slots), default=0)
-        all_daykeys = sorted({_day_key(s) for s in slots})
+        max_pair = max((_positive_int(getattr(s, "pair_number", 0)) for s in slots), default=0)
+
+        study_slots = [s for s in slots if not bool(getattr(s, "is_lunch_break", False))]
+        if not study_slots:
+            raise ValidationError("Solver: нет учебных слотов (без обеденных перерывов).")
 
         lock_map: Dict[int, ScheduleLock] = {}
-        if locks:
-            for lk in locks:
-                lock_map[int(lk.event_id)] = lk
-
-        # ----------------------------------------------------
-        # Прединдексация доступных слотов по week_type
-        # ----------------------------------------------------
-        study_slots = [s for s in slots if not bool(getattr(s, "is_lunch_break", False))]
+        for lk in locks or []:
+            eid = _positive_int(getattr(lk, "event_id", 0))
+            if eid > 0:
+                lock_map[eid] = ScheduleLock(
+                    event_id=eid,
+                    slot_id=_optional_int(getattr(lk, "slot_id", None)),
+                    teacher_id=_optional_int(getattr(lk, "teacher_id", None)),
+                    room_id=_optional_int(getattr(lk, "room_id", None)),
+                )
 
         slots_by_week_type: DefaultDict[int, List[TimeSlot]] = defaultdict(list)
         for s in study_slots:
-            slots_by_week_type[int(s.week_type)].append(s)
+            wt = _positive_int(getattr(s, "week_type", 0))
+            slots_by_week_type[wt].append(s)
+
+        event_options, feasibility_issues = self._build_event_options(
+            teachers=teachers,
+            groups=groups,
+            rooms=rooms,
+            slots=study_slots,
+            slots_by_week_type=slots_by_week_type,
+            curriculum=curriculum,
+            events=events,
+            teacher_subjects=teacher_subjects,
+            teacher_availability=teacher_availability,
+            group_by_id=group_by_id,
+            lock_map=lock_map,
+        )
+
+        if feasibility_issues:
+            raise ValidationError(self._format_feasibility_issues(feasibility_issues))
+
+        if not event_options:
+            raise ValidationError("Solver: после подготовки не осталось допустимых событий.")
+
+        model = cp_model.CpModel()
+
+        # x[(eid, idx)] = 1, если для события eid выбрана option idx
+        x: Dict[Tuple[int, int], cp_model.IntVar] = {}
+        for eid, options in event_options.items():
+            for idx, _opt in enumerate(options):
+                x[(eid, idx)] = model.NewBoolVar(f"x_e{eid}_o{idx}")
+
+        # Каждое событие должно быть назначено ровно в одну опцию.
+        for eid, options in event_options.items():
+            model.Add(sum(x[(eid, idx)] for idx in range(len(options))) == 1)
 
         # ----------------------------------------------------
-        # Подготовка допустимых опций для каждого события
-        # event_options[event_id] = [(slot_id, teacher_id, room_id, room_penalty)]
+        # Жёсткие ограничения конфликтов по слотам
         # ----------------------------------------------------
-        event_options: Dict[int, List[Tuple[int, int, int, int]]] = {}
+        group_usage: DefaultDict[Tuple[int, int], List[cp_model.IntVar]] = defaultdict(list)
+        teacher_usage: DefaultDict[Tuple[int, int], List[cp_model.IntVar]] = defaultdict(list)
+        room_usage: DefaultDict[Tuple[int, int], List[cp_model.IntVar]] = defaultdict(list)
+
+        # Для soft-ограничений собираем индексы по дням.
+        group_day_pair_usage: DefaultDict[Tuple[int, Tuple[int, int], int], List[cp_model.IntVar]] = defaultdict(list)
+        teacher_day_pair_usage: DefaultDict[Tuple[int, Tuple[int, int], int], List[cp_model.IntVar]] = defaultdict(list)
+        group_day_usage_any: DefaultDict[Tuple[int, Tuple[int, int]], List[cp_model.IntVar]] = defaultdict(list)
+        teacher_day_usage_any: DefaultDict[Tuple[int, Tuple[int, int]], List[cp_model.IntVar]] = defaultdict(list)
+
+        room_penalty_terms: List[cp_model.LinearExpr] = []
+        lecture_late_terms: List[cp_model.LinearExpr] = []
 
         for e in events:
-            eid = int(e.id_event)
-            cur = curriculum[int(e.curriculum_id)]
+            eid = _positive_int(getattr(e, "id_event", 0))
+            if eid <= 0:
+                continue
 
-            group_ids = list(getattr(e, "group_ids", [int(e.group_id)]))
-            group_sizes = []
+            group_ids = tuple(
+                _positive_int(gid)
+                for gid in list(getattr(e, "group_ids", []) or [getattr(e, "group_id", 0)])
+                if _positive_int(gid) > 0
+            )
+            if not group_ids:
+                group_ids = (_positive_int(getattr(e, "group_id", 0)),)
+
+            part_type = str(getattr(e, "part_type", "") or "").strip()
+
+            options = event_options[eid]
+            for idx, (slot_id, teacher_id, room_id, room_penalty) in enumerate(options):
+                lit = x[(eid, idx)]
+                slot = slot_by_id[slot_id]
+                daykey = _day_key(slot)
+                pair_number = _positive_int(getattr(slot, "pair_number", 0))
+
+                for gid in group_ids:
+                    group_usage[(gid, slot_id)].append(lit)
+                    group_day_pair_usage[(gid, daykey, pair_number)].append(lit)
+                    group_day_usage_any[(gid, daykey)].append(lit)
+
+                teacher_usage[(teacher_id, slot_id)].append(lit)
+                room_usage[(room_id, slot_id)].append(lit)
+
+                teacher_day_pair_usage[(teacher_id, daykey, pair_number)].append(lit)
+                teacher_day_usage_any[(teacher_id, daykey)].append(lit)
+
+                if room_penalty > 0:
+                    room_penalty_terms.append(room_penalty * lit)
+
+                lecture_preferred_last_pair = _positive_int(
+                    getattr(rules, "lecture_preferred_last_pair", 2),
+                    2,
+                )
+                if part_type == "lecture" and pair_number > lecture_preferred_last_pair:
+                    lecture_late_terms.append((pair_number - lecture_preferred_last_pair) * lit)
+
+        for _key, lits in group_usage.items():
+            if len(lits) > 1:
+                model.Add(sum(lits) <= 1)
+
+        for _key, lits in teacher_usage.items():
+            if len(lits) > 1:
+                model.Add(sum(lits) <= 1)
+
+        for _key, lits in room_usage.items():
+            if len(lits) > 1:
+                model.Add(sum(lits) <= 1)
+
+        # ----------------------------------------------------
+        # Teacher hard max per day
+        # ----------------------------------------------------
+        teacher_hard_max_pairs = max(
+            1,
+            _positive_int(getattr(rules, "teacher_hard_max_pairs", 6), 6),
+        )
+
+        for (teacher_id, daykey), lits in teacher_day_usage_any.items():
+            if not lits:
+                continue
+            day_load = model.NewIntVar(
+                0,
+                max_pair if max_pair > 0 else len(lits),
+                f"teacher_{teacher_id}_day_{daykey[0]}_{daykey[1]}_load",
+            )
+            model.Add(day_load == sum(lits))
+            model.Add(day_load <= teacher_hard_max_pairs)
+
+        # ----------------------------------------------------
+        # Soft constraints
+        # ----------------------------------------------------
+        objective_terms: List[cp_model.LinearExpr] = []
+
+        # 1) Штраф за перерасход типа аудитории
+        if room_penalty_terms:
+            objective_terms.append(sum(room_penalty_terms))
+
+        # 2) Лекции не слишком поздно
+        if lecture_late_terms:
+            objective_terms.append(
+                _positive_int(getattr(rules, "w_lecture_late", 70), 70) * sum(lecture_late_terms)
+            )
+
+        # 3) Перегруз преподавателя сверх soft max
+        teacher_soft_max_pairs = max(
+            1,
+            _positive_int(getattr(rules, "teacher_soft_max_pairs", 4), 4),
+        )
+        teacher_over_soft_terms: List[cp_model.LinearExpr] = []
+        for (teacher_id, daykey), lits in teacher_day_usage_any.items():
+            if not lits:
+                continue
+
+            day_load = model.NewIntVar(
+                0,
+                max_pair if max_pair > 0 else len(lits),
+                f"teacher_soft_{teacher_id}_day_{daykey[0]}_{daykey[1]}_load",
+            )
+            model.Add(day_load == sum(lits))
+
+            over = model.NewIntVar(
+                0,
+                max(0, max_pair - teacher_soft_max_pairs) if max_pair > 0 else len(lits),
+                f"teacher_soft_{teacher_id}_day_{daykey[0]}_{daykey[1]}_over",
+            )
+            model.Add(over >= day_load - teacher_soft_max_pairs)
+            model.Add(over >= 0)
+            teacher_over_soft_terms.append(over)
+
+        if teacher_over_soft_terms:
+            objective_terms.append(
+                _positive_int(getattr(rules, "w_teacher_over_soft", 700), 700)
+                * sum(teacher_over_soft_terms)
+            )
+
+        # 4) Окна преподавателей
+        teacher_gap_terms: List[cp_model.LinearExpr] = []
+        for teacher in teachers:
+            tid = _positive_int(getattr(teacher, "id_teacher", 0))
+            if tid <= 0:
+                continue
+
+            for daykey in sorted({key[1] for key in teacher_day_pair_usage.keys() if key[0] == tid}):
+                occupied_by_pair: Dict[int, cp_model.IntVar] = {}
+                for pair in range(1, max_pair + 1):
+                    lits = teacher_day_pair_usage.get((tid, daykey, pair), [])
+                    if lits:
+                        occupied_by_pair[pair] = _or_bool(
+                            model,
+                            lits,
+                            f"teacher_{tid}_{daykey[0]}_{daykey[1]}_pair_{pair}_occ",
+                        )
+
+                if not occupied_by_pair:
+                    continue
+
+                gaps = _gaps_for_day(
+                    model=model,
+                    occupied_by_pair=occupied_by_pair,
+                    max_pair=max_pair,
+                    name_prefix=f"teacher_{tid}_{daykey[0]}_{daykey[1]}",
+                    allow_lunch_gap=bool(getattr(rules, "allow_lunch_gap", True)),
+                    lunch_min=_positive_int(getattr(rules, "lunch_gap_min_pair", 2), 2),
+                    lunch_max=_positive_int(getattr(rules, "lunch_gap_max_pair", 3), 3),
+                )
+                teacher_gap_terms.append(gaps)
+
+        if teacher_gap_terms:
+            objective_terms.append(
+                _positive_int(getattr(rules, "w_teacher_gaps", 150), 150)
+                * sum(teacher_gap_terms)
+            )
+
+        # 5) Окна студентов
+        if not bool(getattr(rules, "allow_student_gaps", False)):
+            student_gap_terms: List[cp_model.LinearExpr] = []
+            for group in groups:
+                gid = _positive_int(getattr(group, "id_group", 0))
+                if gid <= 0:
+                    continue
+
+                for daykey in sorted({key[1] for key in group_day_pair_usage.keys() if key[0] == gid}):
+                    occupied_by_pair: Dict[int, cp_model.IntVar] = {}
+                    for pair in range(1, max_pair + 1):
+                        lits = group_day_pair_usage.get((gid, daykey, pair), [])
+                        if lits:
+                            occupied_by_pair[pair] = _or_bool(
+                                model,
+                                lits,
+                                f"group_{gid}_{daykey[0]}_{daykey[1]}_pair_{pair}_occ",
+                            )
+
+                    if not occupied_by_pair:
+                        continue
+
+                    gaps = _gaps_for_day(
+                        model=model,
+                        occupied_by_pair=occupied_by_pair,
+                        max_pair=max_pair,
+                        name_prefix=f"group_{gid}_{daykey[0]}_{daykey[1]}",
+                        allow_lunch_gap=bool(getattr(rules, "allow_lunch_gap", True)),
+                        lunch_min=_positive_int(getattr(rules, "lunch_gap_min_pair", 2), 2),
+                        lunch_max=_positive_int(getattr(rules, "lunch_gap_max_pair", 3), 3),
+                    )
+                    student_gap_terms.append(gaps)
+
+            if student_gap_terms:
+                objective_terms.append(
+                    _positive_int(getattr(rules, "w_students_gaps", 600), 600)
+                    * sum(student_gap_terms)
+                )
+
+        # 6) Штраф за слишком короткий / слишком длинный день студентов
+        student_day_load_terms: List[cp_model.LinearExpr] = []
+        min_pairs_students_per_day = max(
+            0,
+            _positive_int(getattr(rules, "min_pairs_students_per_day", 2), 2),
+        )
+        max_pairs_students_per_day = max(
+            1,
+            _positive_int(getattr(rules, "max_pairs_students_per_day", 5), 5),
+        )
+
+        for (gid, daykey), lits in group_day_usage_any.items():
+            if not lits:
+                continue
+
+            has_day = _or_bool(model, lits, f"group_{gid}_{daykey[0]}_{daykey[1]}_has_day")
+            day_load = model.NewIntVar(
+                0,
+                max_pair if max_pair > 0 else len(lits),
+                f"group_{gid}_{daykey[0]}_{daykey[1]}_load",
+            )
+            model.Add(day_load == sum(lits))
+
+            low = model.NewIntVar(
+                0,
+                max_pair,
+                f"group_{gid}_{daykey[0]}_{daykey[1]}_underload",
+            )
+            high = model.NewIntVar(
+                0,
+                max_pair,
+                f"group_{gid}_{daykey[0]}_{daykey[1]}_overload",
+            )
+
+            # Если день используется, желательно не меньше min и не больше max.
+            model.Add(low >= min_pairs_students_per_day * has_day - day_load)
+            model.Add(low >= 0)
+            model.Add(high >= day_load - max_pairs_students_per_day)
+            model.Add(high >= 0)
+
+            student_day_load_terms.append(low)
+            student_day_load_terms.append(high)
+
+        if student_day_load_terms:
+            objective_terms.append(
+                _positive_int(getattr(rules, "w_students_day_load", 500), 500)
+                * sum(student_day_load_terms)
+            )
+
+        # 7) Методдень преподавателя: желательно иметь хотя бы один полностью свободный день
+        if bool(getattr(rules, "consider_method_day", True)):
+            all_daykeys = sorted({_day_key(s) for s in study_slots})
+            method_day_terms: List[cp_model.LinearExpr] = []
+
+            for teacher in teachers:
+                tid = _positive_int(getattr(teacher, "id_teacher", 0))
+                if tid <= 0:
+                    continue
+                if not bool(getattr(teacher, "needs_method_day", True)):
+                    continue
+
+                used_day_bools: List[cp_model.IntVar] = []
+                for daykey in all_daykeys:
+                    lits = teacher_day_usage_any.get((tid, daykey), [])
+                    used_day_bools.append(
+                        _or_bool(
+                            model,
+                            lits,
+                            f"teacher_{tid}_{daykey[0]}_{daykey[1]}_used_day",
+                        )
+                    )
+
+                if not used_day_bools:
+                    continue
+
+                days_used = model.NewIntVar(
+                    0,
+                    len(used_day_bools),
+                    f"teacher_{tid}_days_used",
+                )
+                model.Add(days_used == sum(used_day_bools))
+
+                no_method_day = model.NewIntVar(
+                    0,
+                    len(used_day_bools),
+                    f"teacher_{tid}_no_method_day",
+                )
+                # штраф 0, если есть хотя бы один свободный день
+                model.Add(no_method_day >= days_used - (len(used_day_bools) - 1))
+                model.Add(no_method_day >= 0)
+                method_day_terms.append(no_method_day)
+
+            if method_day_terms:
+                objective_terms.append(
+                    _positive_int(getattr(rules, "w_method_day", 250), 250)
+                    * sum(method_day_terms)
+                )
+
+        if objective_terms:
+            model.Minimize(sum(objective_terms))
+        else:
+            model.Minimize(0)
+
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = float(time_limit_seconds)
+        solver.parameters.random_seed = int(random_seed)
+        solver.parameters.num_search_workers = 8
+        solver.parameters.log_search_progress = False
+
+        collector = _SolutionCollector(
+            x_vars=x,
+            event_options=event_options,
+            k_solutions=k_solutions,
+        )
+
+        status = solver.Solve(model, collector)
+
+        if status not in (
+            cp_model.OPTIMAL,
+            cp_model.FEASIBLE,
+        ):
+            raise SolverError(self._status_to_message(status))
+
+        # На некоторых версиях CP-SAT callback может вернуть 0 решений,
+        # если нашли решение только в основном проходе без callback-коллекции.
+        if not collector.solutions:
+            entries: List[SolutionEntry] = []
+            for eid, options in event_options.items():
+                found = False
+                for idx, (slot_id, teacher_id, room_id, _room_penalty) in enumerate(options):
+                    if solver.Value(x[(eid, idx)]):
+                        entries.append(
+                            SolutionEntry(
+                                event_id=int(eid),
+                                slot_id=int(slot_id),
+                                teacher_id=int(teacher_id),
+                                room_id=int(room_id),
+                            )
+                        )
+                        found = True
+                        break
+                if not found:
+                    raise SolverError(
+                        f"Solver нашёл решение, но не назначил опцию для event_id={eid}."
+                    )
+
+            return [
+                Solution(
+                    entries=entries,
+                    objective_value=int(solver.ObjectiveValue()),
+                    meta={"status": self._status_name(status)},
+                )
+            ]
+
+        for sol in collector.solutions:
+            sol.meta["status"] = self._status_name(status)
+
+        return collector.solutions
+
+    # ---------------------------------------------------------
+    # Подготовка опций для событий
+    # ---------------------------------------------------------
+    def _build_event_options(
+        self,
+        *,
+        teachers: List[Teacher],
+        groups: List[StudentGroup],
+        rooms: List[Room],
+        slots: List[TimeSlot],
+        slots_by_week_type: Dict[int, List[TimeSlot]],
+        curriculum: Dict[int, CurriculumItem],
+        events: List[object],
+        teacher_subjects: Dict[Tuple[int, int, str], bool],
+        teacher_availability: Dict[Tuple[int, int], bool],
+        group_by_id: Dict[int, StudentGroup],
+        lock_map: Dict[int, ScheduleLock],
+    ) -> Tuple[Dict[int, List[Tuple[int, int, int, int]]], List[FeasibilityIssue]]:
+        event_options: Dict[int, List[Tuple[int, int, int, int]]] = {}
+        issues: List[FeasibilityIssue] = []
+
+        for e in events:
+            eid = _positive_int(getattr(e, "id_event", 0))
+            curriculum_id = _positive_int(getattr(e, "curriculum_id", 0))
+            subject_id = _positive_int(getattr(e, "subject_id", 0))
+            part_type = str(getattr(e, "part_type", "") or "").strip()
+
+            if eid <= 0:
+                issues.append(
+                    FeasibilityIssue(
+                        event_id=0,
+                        reason="Некорректный id_event.",
+                        subject_id=subject_id,
+                        part_type=part_type,
+                        group_ids=tuple(),
+                        candidate_teachers=0,
+                        candidate_rooms=0,
+                        candidate_slots=0,
+                    )
+                )
+                continue
+
+            cur = curriculum.get(curriculum_id)
+            if cur is None:
+                issues.append(
+                    FeasibilityIssue(
+                        event_id=eid,
+                        reason=f"Не найден CurriculumItem для curriculum_id={curriculum_id}.",
+                        subject_id=subject_id,
+                        part_type=part_type,
+                        group_ids=tuple(),
+                        candidate_teachers=0,
+                        candidate_rooms=0,
+                        candidate_slots=0,
+                    )
+                )
+                continue
+
+            group_ids = tuple(
+                _positive_int(gid)
+                for gid in list(getattr(e, "group_ids", []) or [getattr(e, "group_id", 0)])
+                if _positive_int(gid) > 0
+            )
+
+            if not group_ids:
+                issues.append(
+                    FeasibilityIssue(
+                        event_id=eid,
+                        reason="У события нет group_ids/group_id.",
+                        subject_id=subject_id,
+                        part_type=part_type,
+                        group_ids=tuple(),
+                        candidate_teachers=0,
+                        candidate_rooms=0,
+                        candidate_slots=0,
+                    )
+                )
+                continue
+
+            total_group_size = 0
+            group_missing = False
             for gid in group_ids:
-                grp = group_by_id.get(int(gid))
+                grp = group_by_id.get(gid)
                 if grp is None:
-                    raise ValueError(f"Group not found for event={eid}, group_id={gid}")
-                group_sizes.append(int(grp.quantity))
+                    group_missing = True
+                    break
+                total_group_size += _positive_int(getattr(grp, "quantity", 0))
 
-            total_group_size = sum(group_sizes)
+            if group_missing:
+                issues.append(
+                    FeasibilityIssue(
+                        event_id=eid,
+                        reason="Для одной из групп события не найдена запись StudentGroup.",
+                        subject_id=subject_id,
+                        part_type=part_type,
+                        group_ids=group_ids,
+                        candidate_teachers=0,
+                        candidate_rooms=0,
+                        candidate_slots=0,
+                    )
+                )
+                continue
 
-            # -----------------------------
-            # Rooms: сразу сортируем и режем хвост
-            # -----------------------------
+            required_room_type = str(getattr(e, "required_room_type", "") or "").strip()
+            if not required_room_type:
+                required_room_type = str(getattr(cur, "required_room_type", "") or "").strip()
+
             candidate_rooms = [
-                r for r in rooms
-                if _room_matches_required(r, cur.required_room_type) and int(r.capacity) >= total_group_size
+                r
+                for r in rooms
+                if _room_matches_required(r, required_room_type)
+                and _positive_int(getattr(r, "capacity", 0)) >= total_group_size
             ]
             candidate_rooms.sort(
                 key=lambda r: (
-                    _room_priority_penalty(r, cur.required_room_type),
-                    int(r.capacity) - total_group_size,
-                    int(r.id_room),
+                    _room_priority_penalty(r, required_room_type),
+                    _positive_int(getattr(r, "capacity", 0)) - total_group_size,
+                    _positive_int(getattr(r, "id_room", 0)),
                 )
             )
             candidate_rooms = candidate_rooms[:MAX_ROOMS_PER_EVENT]
 
-            # -----------------------------
-            # Teachers
-            # -----------------------------
             candidate_teachers = [
-                t for t in teachers
-                if teacher_subjects.get((int(t.id_teacher), int(e.subject_id), str(e.part_type)), False)
+                t
+                for t in teachers
+                if teacher_subjects.get(
+                    (
+                        _positive_int(getattr(t, "id_teacher", 0)),
+                        subject_id,
+                        part_type,
+                    ),
+                    False,
+                )
             ]
-            candidate_teachers.sort(key=lambda t: int(t.id_teacher))
+            candidate_teachers.sort(key=lambda t: _positive_int(getattr(t, "id_teacher", 0)))
 
-            # -----------------------------
-            # Slots
-            # fixed_week_number <= 0 считаем "не зафиксировано"
-            # -----------------------------
-            fixed_week_number = getattr(e, "fixed_week_number", None)
-            if fixed_week_number is not None and int(fixed_week_number) <= 0:
-                fixed_week_number = None
-
-            fixed_week_type = getattr(e, "fixed_week_type", None)
+            fixed_week_number = _optional_int(getattr(e, "fixed_week_number", None))
+            fixed_week_type = _optional_int(getattr(e, "fixed_week_type", None))
 
             if fixed_week_type is not None:
                 candidate_slots = list(slots_by_week_type.get(int(fixed_week_type), []))
             else:
-                candidate_slots = list(study_slots)
+                candidate_slots = list(slots)
 
             if fixed_week_number is not None:
                 candidate_slots = [
-                    s for s in candidate_slots
-                    if int(getattr(s, "week_number_in_semester", 0) or 0) == int(fixed_week_number)
+                    s
+                    for s in candidate_slots
+                    if _positive_int(getattr(s, "week_number_in_semester", 0), 0) == fixed_week_number
                 ]
 
             candidate_slots.sort(
                 key=lambda s: (
-                    int(getattr(s, "week_type", 0) or 0),
-                    int(getattr(s, "day_of_week", 0) or 0),
-                    int(getattr(s, "pair_number", 0) or 0),
-                    int(s.id_slot),
+                    _positive_int(getattr(s, "week_type", 0)),
+                    _positive_int(getattr(s, "day_of_week", 0)),
+                    _positive_int(getattr(s, "pair_number", 0)),
+                    _positive_int(getattr(s, "id_slot", 0)),
                 )
             )
             candidate_slots = candidate_slots[:MAX_SLOTS_PER_EVENT]
 
-            # -----------------------------
-            # Locks
-            # -----------------------------
             lk = lock_map.get(eid)
             if lk is not None and lk.slot_id is not None:
-                candidate_slots = [s for s in candidate_slots if int(s.id_slot) == int(lk.slot_id)]
+                candidate_slots = [
+                    s for s in candidate_slots if _positive_int(getattr(s, "id_slot", 0)) == lk.slot_id
+                ]
             if lk is not None and lk.teacher_id is not None:
-                candidate_teachers = [t for t in candidate_teachers if int(t.id_teacher) == int(lk.teacher_id)]
+                candidate_teachers = [
+                    t
+                    for t in candidate_teachers
+                    if _positive_int(getattr(t, "id_teacher", 0)) == lk.teacher_id
+                ]
             if lk is not None and lk.room_id is not None:
-                candidate_rooms = [r for r in candidate_rooms if int(r.id_room) == int(lk.room_id)]
+                candidate_rooms = [
+                    r
+                    for r in candidate_rooms
+                    if _positive_int(getattr(r, "id_room", 0)) == lk.room_id
+                ]
 
-            # -----------------------------
-            # Итоговые опции
-            # -----------------------------
             opts: List[Tuple[int, int, int, int]] = []
             for s in candidate_slots:
-                sid = int(s.id_slot)
+                sid = _positive_int(getattr(s, "id_slot", 0))
+                if sid <= 0:
+                    continue
+
                 for t in candidate_teachers:
-                    tid = int(t.id_teacher)
+                    tid = _positive_int(getattr(t, "id_teacher", 0))
+                    if tid <= 0:
+                        continue
+
                     if not teacher_availability.get((tid, sid), True):
                         continue
+
                     for r in candidate_rooms:
-                        penalty = _room_priority_penalty(r, cur.required_room_type)
-                        opts.append((sid, tid, int(r.id_room), int(penalty)))
+                        rid = _positive_int(getattr(r, "id_room", 0))
+                        if rid <= 0:
+                            continue
+
+                        penalty = _room_priority_penalty(r, required_room_type)
+                        opts.append((sid, tid, rid, _positive_int(penalty, 0)))
 
             if not opts:
-                raise ValueError(
-                    f"No feasible options for event={eid} "
-                    f"(groups={group_ids}, subject={e.subject_id}, part={e.part_type}). "
-                    f"teachers={len(candidate_teachers)}, rooms={len(candidate_rooms)}, slots={len(candidate_slots)}. "
-                    f"Check teacher qualification by part_type, room type/capacity, availability, locks."
+                reason_parts: List[str] = []
+                if not candidate_teachers:
+                    reason_parts.append("нет преподавателей для subject/part_type")
+                if not candidate_rooms:
+                    reason_parts.append("нет подходящих аудиторий по типу/вместимости")
+                if not candidate_slots:
+                    reason_parts.append("нет допустимых слотов")
+                if candidate_teachers and candidate_slots and candidate_rooms:
+                    reason_parts.append("после фильтра availability не осталось допустимых комбинаций")
+
+                issues.append(
+                    FeasibilityIssue(
+                        event_id=eid,
+                        reason="; ".join(reason_parts) if reason_parts else "не найдено допустимых комбинаций",
+                        subject_id=subject_id,
+                        part_type=part_type,
+                        group_ids=group_ids,
+                        candidate_teachers=len(candidate_teachers),
+                        candidate_rooms=len(candidate_rooms),
+                        candidate_slots=len(candidate_slots),
+                    )
                 )
+                continue
 
             event_options[eid] = opts
 
-        # ====================================================
-        # Поиск k решений через no-good cuts
-        # ====================================================
-        solutions: List[Solution] = []
-        nogoods: List[Dict[int, Tuple[int, int, int, int]]] = []
+        return event_options, issues
 
-        for _variant_idx in range(max(1, int(k_solutions))):
-            model = cp_model.CpModel()
+    # ---------------------------------------------------------
+    # Ошибки / статусы
+    # ---------------------------------------------------------
+    def _format_feasibility_issues(self, issues: List[FeasibilityIssue]) -> str:
+        head = "Невозможно запустить solver: найдены события без допустимых назначений."
+        lines = [head]
 
-            x: Dict[Tuple[int, int], cp_model.IntVar] = {}
-
-            # Индексы для быстрого построения ограничений и штрафов
-            used_group_slot: DefaultDict[Tuple[int, int], List[cp_model.IntVar]] = defaultdict(list)
-            used_teacher_slot: DefaultDict[Tuple[int, int], List[cp_model.IntVar]] = defaultdict(list)
-            used_room_slot: DefaultDict[Tuple[int, int], List[cp_model.IntVar]] = defaultdict(list)
-
-            occ_group_day_pair: DefaultDict[Tuple[int, Tuple[int, int], int], List[cp_model.IntVar]] = defaultdict(list)
-            occ_teacher_day_pair: DefaultDict[Tuple[int, Tuple[int, int], int], List[cp_model.IntVar]] = defaultdict(list)
-            teacher_day_load_lits: DefaultDict[Tuple[int, Tuple[int, int]], List[cp_model.IntVar]] = defaultdict(list)
-
-            # ------------------------------------------------
-            # Exactly one option per event
-            # ------------------------------------------------
-            for e in events:
-                eid = int(e.id_event)
-                opts = event_options[eid]
-
-                bools: List[cp_model.IntVar] = []
-                group_ids = list(getattr(e, "group_ids", [int(e.group_id)]))
-
-                for i, (slot_id, teacher_id, room_id, _room_penalty) in enumerate(opts):
-                    b = model.NewBoolVar(f"x_e{eid}_o{i}")
-                    x[(eid, i)] = b
-                    bools.append(b)
-
-                    slot = slot_by_id[int(slot_id)]
-                    daykey = _day_key(slot)
-                    pair_no = int(slot.pair_number)
-
-                    for gid in group_ids:
-                        gid = int(gid)
-                        used_group_slot[(gid, int(slot_id))].append(b)
-                        occ_group_day_pair[(gid, daykey, pair_no)].append(b)
-
-                    tid = int(teacher_id)
-                    rid = int(room_id)
-
-                    used_teacher_slot[(tid, int(slot_id))].append(b)
-                    used_room_slot[(rid, int(slot_id))].append(b)
-
-                    occ_teacher_day_pair[(tid, daykey, pair_no)].append(b)
-                    teacher_day_load_lits[(tid, daykey)].append(b)
-
-                model.AddExactlyOne(bools)
-
-            # ------------------------------------------------
-            # Жёсткие конфликты
-            # ------------------------------------------------
-            for lits in used_group_slot.values():
-                if len(lits) > 1:
-                    model.Add(sum(lits) <= 1)
-
-            for lits in used_teacher_slot.values():
-                if len(lits) > 1:
-                    model.Add(sum(lits) <= 1)
-
-            for lits in used_room_slot.values():
-                if len(lits) > 1:
-                    model.Add(sum(lits) <= 1)
-
-            objective_terms = []
-
-            # ------------------------------------------------
-            # Штрафы за окна у групп
-            # ------------------------------------------------
-            w_group_gaps = int(getattr(rules, "w_group_gaps", 10))
-            if w_group_gaps > 0:
-                for g in groups:
-                    gid = int(g.id_group)
-                    for daykey in all_daykeys:
-                        occ_by_pair: Dict[int, cp_model.IntVar] = {}
-                        for p in range(1, max_pair + 1):
-                            lits = occ_group_day_pair.get((gid, daykey, p), [])
-                            occ_by_pair[p] = _or_bool(model, lits, f"occ_g{gid}_{daykey}_{p}")
-
-                        gaps = _gaps_for_day(
-                            model=model,
-                            occupied_by_pair=occ_by_pair,
-                            max_pair=max_pair,
-                            name_prefix=f"g{gid}_{daykey}",
-                            allow_lunch_gap=bool(getattr(rules, "allow_lunch_gap", True)),
-                            lunch_min=int(getattr(rules, "lunch_gap_min_pair", 2)),
-                            lunch_max=int(getattr(rules, "lunch_gap_max_pair", 3)),
-                        )
-                        objective_terms.append(w_group_gaps * gaps)
-
-            # ------------------------------------------------
-            # Штрафы за окна у преподавателей
-            # ------------------------------------------------
-            w_teacher_gaps = int(getattr(rules, "w_teacher_gaps", 6))
-            if w_teacher_gaps > 0:
-                for t in teachers:
-                    tid = int(t.id_teacher)
-                    for daykey in all_daykeys:
-                        occ_by_pair: Dict[int, cp_model.IntVar] = {}
-                        for p in range(1, max_pair + 1):
-                            lits = occ_teacher_day_pair.get((tid, daykey, p), [])
-                            occ_by_pair[p] = _or_bool(model, lits, f"occ_t{tid}_{daykey}_{p}")
-
-                        gaps = _gaps_for_day(
-                            model=model,
-                            occupied_by_pair=occ_by_pair,
-                            max_pair=max_pair,
-                            name_prefix=f"t{tid}_{daykey}",
-                            allow_lunch_gap=bool(getattr(rules, "allow_lunch_gap", True)),
-                            lunch_min=int(getattr(rules, "lunch_gap_min_pair", 2)),
-                            lunch_max=int(getattr(rules, "lunch_gap_max_pair", 3)),
-                        )
-                        objective_terms.append(w_teacher_gaps * gaps)
-
-            # ------------------------------------------------
-            # Штраф за перегруз преподавателя
-            # ------------------------------------------------
-            w_teacher_overload = int(getattr(rules, "w_teacher_overload", 8))
-            if w_teacher_overload > 0:
-                for t in teachers:
-                    tid = int(t.id_teacher)
-                    soft_max = int(getattr(t, "soft_max_pairs_per_day", 4))
-
-                    for daykey in all_daykeys:
-                        lits = teacher_day_load_lits.get((tid, daykey), [])
-                        if not lits:
-                            continue
-
-                        load = model.NewIntVar(0, len(lits), f"load_t{tid}_{daykey}")
-                        model.Add(load == sum(lits))
-
-                        overload = model.NewIntVar(0, len(lits), f"over_t{tid}_{daykey}")
-                        model.Add(overload >= load - soft_max)
-                        model.Add(overload >= 0)
-
-                        objective_terms.append(w_teacher_overload * overload)
-
-            # ------------------------------------------------
-            # Лекции не на последней паре
-            # ------------------------------------------------
-            w_last_pair_lecture = int(getattr(rules, "w_last_pair_lecture", 4))
-            if w_last_pair_lecture > 0:
-                for e in events:
-                    if str(e.part_type) != "lecture":
-                        continue
-                    eid = int(e.id_event)
-                    opts = event_options[eid]
-                    for i, (slot_id, _tid, _rid, _rp) in enumerate(opts):
-                        slot = slot_by_id[int(slot_id)]
-                        if int(slot.pair_number) == max_pair:
-                            objective_terms.append(w_last_pair_lecture * x[(eid, i)])
-
-            # ------------------------------------------------
-            # Штраф за субботу
-            # ------------------------------------------------
-            w_saturday_penalty = int(getattr(rules, "w_saturday_penalty", 50))
-            if w_saturday_penalty > 0:
-                for e in events:
-                    eid = int(e.id_event)
-                    opts = event_options[eid]
-                    for i, (slot_id, _tid, _rid, _rp) in enumerate(opts):
-                        slot = slot_by_id[int(slot_id)]
-                        if int(slot.day_of_week) == 6:
-                            objective_terms.append(w_saturday_penalty * x[(eid, i)])
-
-            # ------------------------------------------------
-            # Штраф за использование "слишком ценной" аудитории
-            # ------------------------------------------------
-            w_room_priority = int(getattr(rules, "w_room_priority", 5))
-            if w_room_priority > 0:
-                for e in events:
-                    eid = int(e.id_event)
-                    opts = event_options[eid]
-                    for i, (_slot_id, _tid, _rid, room_penalty) in enumerate(opts):
-                        if int(room_penalty) > 0:
-                            objective_terms.append(w_room_priority * int(room_penalty) * x[(eid, i)])
-
-            # ------------------------------------------------
-            # No-good cuts для поиска нескольких решений
-            # ------------------------------------------------
-            for prev in nogoods:
-                lits = []
-                for event_id, prev_opt in prev.items():
-                    opts = event_options[int(event_id)]
-                    for i, opt in enumerate(opts):
-                        if opt == prev_opt:
-                            lits.append(x[(int(event_id), i)])
-                            break
-                if lits:
-                    model.Add(sum(lits) <= len(lits) - 1)
-
-            model.Minimize(sum(objective_terms) if objective_terms else 0)
-
-            solver = cp_model.CpSolver()
-            solver.parameters.max_time_in_seconds = float(time_limit_seconds)
-            solver.parameters.random_seed = int(random_seed)
-            solver.parameters.num_search_workers = 8
-
-            status = solver.Solve(model)
-            if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-                break
-
-            entries: List[SolutionEntry] = []
-            chosen_for_nogood: Dict[int, Tuple[int, int, int, int]] = {}
-
-            for e in events:
-                eid = int(e.id_event)
-                opts = event_options[eid]
-
-                chosen_i = None
-                for i in range(len(opts)):
-                    if solver.Value(x[(eid, i)]) == 1:
-                        chosen_i = i
-                        break
-
-                if chosen_i is None:
-                    raise ValueError(f"Chosen option not found for event={eid}")
-
-                slot_id, teacher_id, room_id, room_penalty = opts[chosen_i]
-                chosen_for_nogood[eid] = (slot_id, teacher_id, room_id, room_penalty)
-
-                entries.append(
-                    SolutionEntry(
-                        event_id=eid,
-                        slot_id=int(slot_id),
-                        teacher_id=int(teacher_id),
-                        room_id=int(room_id),
-                    )
-                )
-
-            total_options = sum(len(v) for v in event_options.values())
-
-            solutions.append(
-                Solution(
-                    entries=entries,
-                    objective_value=int(solver.ObjectiveValue()),
-                    meta={
-                        "status": int(status),
-                        "events_count": len(events),
-                        "total_options": int(total_options),
-                        "avg_options_per_event": float(total_options / max(1, len(events))),
-                    },
+        for issue in issues[:10]:
+            lines.append(
+                (
+                    f"- event_id={issue.event_id}, groups={list(issue.group_ids)}, "
+                    f"subject_id={issue.subject_id}, part_type={issue.part_type}: {issue.reason} "
+                    f"(teachers={issue.candidate_teachers}, rooms={issue.candidate_rooms}, slots={issue.candidate_slots})"
                 )
             )
-            nogoods.append(chosen_for_nogood)
 
-        return solutions
+        if len(issues) > 10:
+            lines.append(f"- ... ещё проблемных событий: {len(issues) - 10}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _status_name(status: int) -> str:
+        mapping = {
+            cp_model.OPTIMAL: "OPTIMAL",
+            cp_model.FEASIBLE: "FEASIBLE",
+            cp_model.INFEASIBLE: "INFEASIBLE",
+            cp_model.MODEL_INVALID: "MODEL_INVALID",
+            cp_model.UNKNOWN: "UNKNOWN",
+        }
+        return mapping.get(status, f"STATUS_{status}")
+
+    def _status_to_message(self, status: int) -> str:
+        status_name = self._status_name(status)
+        if status == cp_model.INFEASIBLE:
+            return "Solver не нашёл допустимого решения: модель оказалась несовместимой."
+        if status == cp_model.MODEL_INVALID:
+            return "Solver не смог обработать модель: модель некорректна."
+        if status == cp_model.UNKNOWN:
+            return "Solver завершился без найденного решения в отведённое время."
+        return f"Solver завершился со статусом {status_name}."

@@ -3,98 +3,125 @@ from __future__ import annotations
 import json
 import sys
 import traceback
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from app.di import build_container
 from app.application.use_cases.generate_schedule import GenerateScheduleCommand
+from app.di import build_container
 
 
-def emit(payload: dict) -> None:
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
+def _emit(payload: dict) -> None:
+    """
+    Пишем только JSON-строки в stdout, чтобы UI мог безопасно парсить события worker-процесса.
+    """
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
 
-def progress_cb(stage: str, payload: dict) -> None:
-    emit({
-        "type": "progress",
-        "stage": stage,
-        "payload": payload,
-        "message": f"{stage}: {payload}",
-    })
 
-def main() -> int:
+def _emit_progress(stage: str, data: dict) -> None:
+    _emit(
+        {
+            "type": "progress",
+            "stage": str(stage),
+            "data": data or {},
+        }
+    )
+
+
+def _emit_error(message: str, *, details: str | None = None) -> None:
+    payload = {
+        "type": "error",
+        "message": str(message),
+    }
+    if details:
+        payload["details"] = str(details)
+    _emit(payload)
+
+
+def _emit_done(result) -> None:
+    variants = list(getattr(result, "variants", []) or [])
+
+    payload_variants = []
+    for variant in variants:
+        payload_variants.append(
+            {
+                "id_variant": int(getattr(variant, "id_variant", 0) or 0),
+                "name": str(getattr(variant, "name", "") or ""),
+                "objective_score": int(getattr(variant, "objective_score", 0) or 0),
+                "entries_count": len(list(getattr(variant, "entries", []) or [])),
+            }
+        )
+
+    _emit(
+        {
+            "type": "done",
+            "variants_count": len(payload_variants),
+            "variants": payload_variants,
+            "message": str(getattr(result, "message", "") or ""),
+        }
+    )
+
+
+def _parse_args(argv: list[str]) -> GenerateScheduleCommand:
+    """
+    Ожидаемый формат:
+        python -m app.presentation.workers.generate_worker <calendar_id> <variants_count> <time_limit_seconds>
+    """
+    if len(argv) < 4:
+        raise ValueError(
+            "Недостаточно аргументов. Ожидается: "
+            "<calendar_id> <variants_count> <time_limit_seconds>"
+        )
+
     try:
-        if len(sys.argv) < 4:
-            emit({
-                "type": "error",
-                "message": "Недостаточно аргументов. Ожидалось: calendar_id variants_count time_limit_seconds",
-            })
-            return 2
+        calendar_id = int(argv[1])
+        variants_count = int(argv[2])
+        time_limit_seconds = int(argv[3])
+    except ValueError as exc:
+        raise ValueError(
+            "Аргументы calendar_id, variants_count и time_limit_seconds должны быть целыми числами."
+        ) from exc
 
-        calendar_id = int(sys.argv[1])
-        variants_count = int(sys.argv[2])
-        time_limit_seconds = int(sys.argv[3])
+    return GenerateScheduleCommand(
+        calendar_id=calendar_id,
+        variants_count=variants_count,
+        time_limit_seconds=time_limit_seconds,
+    )
 
-        emit({
-            "type": "progress",
-            "stage": "worker_started",
-            "payload": {
-                "project_root": str(PROJECT_ROOT),
-                "calendar_id": calendar_id,
-                "variants_count": variants_count,
-                "time_limit_seconds": time_limit_seconds,
-            },
-            "message": "worker_started",
-        })
 
-        emit({
-            "type": "progress",
-            "stage": "container_building",
-            "payload": {},
-            "message": "container_building",
-        })
+def main(argv: list[str] | None = None) -> int:
+    argv = argv or sys.argv
+
+    try:
+        command = _parse_args(argv)
+    except Exception as exc:
+        _emit_error(str(exc))
+        return 1
+
+    try:
+        _emit(
+            {
+                "type": "started",
+                "calendar_id": int(command.calendar_id),
+                "variants_count": int(command.variants_count),
+                "time_limit_seconds": int(command.time_limit_seconds),
+            }
+        )
 
         container = build_container()
+        generate_uc = getattr(container, "generate_schedule_uc", None)
+        if generate_uc is None:
+            raise RuntimeError(
+                "В контейнере не найден generate_schedule_uc. Проверь app/di.py."
+            )
 
-        emit({
-            "type": "progress",
-            "stage": "container_built",
-            "payload": {},
-            "message": "container_built",
-        })
-
-        cmd = GenerateScheduleCommand(
-            calendar_id=calendar_id,
-            variants_count=variants_count,
-            time_limit_seconds=time_limit_seconds,
-        )
-
-        result = container.generate_schedule_uc.execute(
-            cmd,
-            progress_cb=progress_cb,
-        )
-
-        variants = getattr(result, "variants", []) or []
-        variant_ids = [int(getattr(v, "id_variant", 0) or 0) for v in variants]
-        variant_names = [str(getattr(v, "name", "") or "") for v in variants]
-
-        emit({
-            "type": "result",
-            "calendar_id": calendar_id,
-            "variant_count": len(variants),
-            "variant_ids": variant_ids,
-            "variant_names": variant_names,
-        })
+        result = generate_uc.execute(command, progress_cb=_emit_progress)
+        _emit_done(result)
         return 0
 
-    except Exception as e:
-        emit({
-            "type": "error",
-            "message": str(e),
-            "traceback": traceback.format_exc(),
-        })
+    except Exception as exc:
+        _emit_error(
+            str(exc),
+            details=traceback.format_exc(),
+        )
         return 1
 
 

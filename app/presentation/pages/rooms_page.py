@@ -1,252 +1,375 @@
 from __future__ import annotations
 
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QTableWidget, QTableWidgetItem, QMessageBox,
-    QDialog, QFormLayout, QLineEdit, QSpinBox,
-    QDialogButtonBox, QListWidget, QListWidgetItem
-)
+from typing import Optional
+
 from PyQt6.QtCore import Qt
-
-# Какие типы поддерживаем (можешь расширять)
-ROOM_TYPES = [
-    ("lecture", "Лекционная"),
-    ("classroom", "Учебная"),
-    ("computer", "Компьютерный класс"),
-    ("lab", "Лаборатория"),
-]
-
-
-def types_to_csv(types: list[str]) -> str:
-    # сохраняем в БД как "lecture,classroom"
-    unique = []
-    for t in types:
-        t = t.strip()
-        if t and t not in unique:
-            unique.append(t)
-    return ",".join(unique)
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 
-def csv_to_types(s: str | None) -> list[str]:
-    if not s:
-        return []
-    return [x.strip() for x in s.split(",") if x.strip()]
-
-
-def type_label(code: str) -> str:
-    for c, name in ROOM_TYPES:
-        if c == code:
-            return name
-    return code
-
-
-def type_labels_csv(csv: str | None) -> str:
-    types = csv_to_types(csv)
-    if not types:
-        return "—"
-    return ", ".join(type_label(t) for t in types)
-
-
-class RoomDialog(QDialog):
+class RoomEditDialog(QDialog):
     """
-    Диалог добавления/редактирования аудитории:
-    - номер
-    - мультивыбор типов
-    - вместимость
+    Диалог создания / редактирования аудитории.
+
+    Актуальная модель:
+    - ID не вводится вручную;
+    - обязательно есть номер/название аудитории;
+    - обязательно есть тип аудитории;
+    - обязательно есть вместимость.
     """
 
-    def __init__(
-        self,
-        parent=None,
-        *,
-        title: str,
-        number_value: str = "",
-        types_csv_value: str = "classroom",
-        capacity_value: int = 30,
-    ):
+    ROOM_TYPES = [
+        ("Лекционная", "lecture"),
+        ("Обычная аудитория", "classroom"),
+        ("Компьютерный класс", "computer"),
+        ("Лаборатория", "lab"),
+    ]
+
+    def __init__(self, parent, room: Optional[object] = None):
         super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumWidth(420)
+        self._room = room
 
-        layout = QFormLayout(self)
+        self.setWindowTitle(
+            "Редактирование аудитории" if room is not None else "Добавление аудитории"
+        )
+        self.resize(420, 200)
 
-        self.number_edit = QLineEdit()
-        self.number_edit.setText(number_value)
+        root = QVBoxLayout(self)
 
-        self.types_list = QListWidget()
-        self.types_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        form = QFormLayout()
+        root.addLayout(form)
 
-        selected = set(csv_to_types(types_csv_value))
+        self.room_number_combo = QComboBox()
+        self.room_number_combo.setEditable(True)
+        self.room_number_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.room_number_combo.setPlaceholderText("Введите номер или название аудитории")
+        form.addRow("Аудитория:", self.room_number_combo)
 
-        for code, name in ROOM_TYPES:
-            item = QListWidgetItem(f"{name} ({code})")
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if code in selected else Qt.CheckState.Unchecked)
-            item.setData(Qt.ItemDataRole.UserRole, code)
-            self.types_list.addItem(item)
+        self.room_type_combo = QComboBox()
+        for label, value in self.ROOM_TYPES:
+            self.room_type_combo.addItem(label, value)
+        form.addRow("Тип аудитории:", self.room_type_combo)
 
         self.capacity_spin = QSpinBox()
-        self.capacity_spin.setRange(1, 1000)
-        self.capacity_spin.setValue(int(capacity_value) if capacity_value else 30)
+        self.capacity_spin.setRange(1, 5000)
+        self.capacity_spin.setValue(30)
+        form.addRow("Вместимость:", self.capacity_spin)
 
-        layout.addRow("Номер аудитории:", self.number_edit)
-        layout.addRow("Типы аудитории:", self.types_list)
-        layout.addRow("Вместимость:", self.capacity_spin)
+        hint = QLabel("ID аудитории создаётся автоматически базой данных.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #667085;")
+        root.addWidget(hint)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        root.addWidget(self.button_box)
 
-    def values(self):
-        number = self.number_edit.text().strip()
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+        self._fill()
+
+    def _fill(self) -> None:
+        if self._room is None:
+            return
+
+        room_number = str(getattr(self._room, "room_number", "") or "")
+        room_type = str(getattr(self._room, "room_type", "") or "")
+        capacity = int(getattr(self._room, "capacity", 30) or 30)
+
+        self.room_number_combo.addItem(room_number)
+        self.room_number_combo.setCurrentText(room_number)
+
+        idx = self.room_type_combo.findData(room_type)
+        if idx >= 0:
+            self.room_type_combo.setCurrentIndex(idx)
+
+        self.capacity_spin.setValue(capacity)
+
+    def get_data(self) -> tuple[str, str, int]:
+        room_number = self.room_number_combo.currentText().strip()
+        room_type = str(self.room_type_combo.currentData() or "")
         capacity = int(self.capacity_spin.value())
-
-        chosen = []
-        for i in range(self.types_list.count()):
-            item = self.types_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                chosen.append(str(item.data(Qt.ItemDataRole.UserRole)))
-
-        return number, chosen, capacity
+        return room_number, room_type, capacity
 
 
 class RoomsPage(QWidget):
-    def __init__(self, container):
-        super().__init__()
-        self.container = container
-        self.rooms_repo = container.rooms_repo
+    """
+    Страница аудиторий.
 
-        self._init_ui()
+    Показывает:
+    - ID
+    - номер/название аудитории
+    - тип аудитории
+    - вместимость
+
+    Важно:
+    - ID не вводится вручную;
+    - данные должны быть пригодны для solver;
+    - тип аудитории и вместимость обязательны.
+    """
+
+    def __init__(self, rooms_repo):
+        super().__init__()
+        self._rooms_repo = rooms_repo
+
+        root = QVBoxLayout(self)
+
+        toolbar = QHBoxLayout()
+        root.addLayout(toolbar)
+
+        toolbar.addStretch(1)
+
+        self.add_btn = QPushButton("Добавить")
+        self.edit_btn = QPushButton("Редактировать")
+        self.delete_btn = QPushButton("Удалить")
+        self.refresh_btn = QPushButton("Обновить")
+
+        toolbar.addWidget(self.add_btn)
+        toolbar.addWidget(self.edit_btn)
+        toolbar.addWidget(self.delete_btn)
+        toolbar.addWidget(self.refresh_btn)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            ["ID", "Аудитория", "Тип", "Вместимость"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 70)
+        self.table.setColumnWidth(1, 220)
+        self.table.setColumnWidth(2, 180)
+        self.table.setColumnWidth(3, 110)
+        root.addWidget(self.table)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        root.addWidget(self.status_label)
+
+        self.add_btn.clicked.connect(self._add_room)
+        self.edit_btn.clicked.connect(self._edit_room)
+        self.delete_btn.clicked.connect(self._delete_room)
+        self.refresh_btn.clicked.connect(self.refresh)
+
         self.refresh()
 
-    def _init_ui(self):
-        layout = QVBoxLayout()
+    def _set_status(self, text: str, error: bool = False) -> None:
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(
+            "color: #b42318;" if error else "color: #344054;"
+        )
 
-        btn_layout = QHBoxLayout()
-        self.btn_refresh = QPushButton("Обновить")
-        self.btn_add = QPushButton("Добавить")
-        self.btn_edit = QPushButton("Редактировать")
-        self.btn_delete = QPushButton("Удалить")
-
-        btn_layout.addWidget(self.btn_refresh)
-        btn_layout.addWidget(self.btn_add)
-        btn_layout.addWidget(self.btn_edit)
-        btn_layout.addWidget(self.btn_delete)
-        layout.addLayout(btn_layout)
-
-        self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["ID", "Номер", "Типы", "Вместимость"])
-        layout.addWidget(self.table)
-
-        self.setLayout(layout)
-
-        self.btn_refresh.clicked.connect(self.refresh)
-        self.btn_add.clicked.connect(self.add_room)
-        self.btn_edit.clicked.connect(self.edit_room)
-        self.btn_delete.clicked.connect(self.delete_room)
-
-    def refresh(self):
-        try:
-            rooms = self.rooms_repo.list_all()
-            self.table.setRowCount(len(rooms))
-
-            for row, r in enumerate(rooms):
-                self.table.setItem(row, 0, QTableWidgetItem(str(r.id_room)))
-                self.table.setItem(row, 1, QTableWidgetItem(str(r.room_number)))
-
-                # room_type теперь CSV: "lecture,classroom"
-                self.table.setItem(row, 2, QTableWidgetItem(type_labels_csv(r.room_type)))
-
-                self.table.setItem(row, 3, QTableWidgetItem(str(r.capacity)))
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
-
-    def _selected_id(self) -> int | None:
+    def _selected_room_id(self) -> Optional[int]:
         row = self.table.currentRow()
         if row < 0:
             return None
         item = self.table.item(row, 0)
-        return int(item.text()) if item else None
+        if item is None:
+            return None
+        try:
+            return int(item.data(Qt.ItemDataRole.UserRole))
+        except (TypeError, ValueError):
+            return None
 
-    def add_room(self):
-        dlg = RoomDialog(self, title="Добавить аудиторию")
+    @staticmethod
+    def _room_type_label(value: str) -> str:
+        mapping = {
+            "lecture": "Лекционная",
+            "classroom": "Обычная аудитория",
+            "computer": "Компьютерный класс",
+            "lab": "Лаборатория",
+        }
+        return mapping.get(value, value or "—")
+
+    def _add_room(self) -> None:
+        dlg = RoomEditDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        number, types, cap = dlg.values()
-        if not number:
-            QMessageBox.warning(self, "Проверка", "Номер аудитории не может быть пустым.")
-            return
-        if not types:
-            QMessageBox.warning(self, "Проверка", "Выберите хотя бы один тип аудитории.")
-            return
+        room_number, room_type, capacity = dlg.get_data()
 
-        try:
-            self.rooms_repo.create(
-                room_number=number,
-                room_type=types_to_csv(types),
-                capacity=cap,
-                building=None,  # корпус больше не используем
+        if not room_number:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Номер или название аудитории не может быть пустым.",
             )
-            self.refresh()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
-
-    def edit_room(self):
-        rid = self._selected_id()
-        if rid is None:
-            QMessageBox.warning(self, "Нет выбора", "Выберите аудиторию.")
             return
 
-        row = self.table.currentRow()
-        number = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
-        # Здесь в таблице мы показываем лейблы, поэтому подтянем реальное значение из БД:
-        room = self.rooms_repo.get_by_id(rid)
-        types_csv = room.room_type if room else "classroom"
-        cap = int(self.table.item(row, 3).text()) if self.table.item(row, 3) else 30
-
-        dlg = RoomDialog(
-            self,
-            title="Редактировать аудиторию",
-            number_value=number,
-            types_csv_value=types_csv,
-            capacity_value=cap,
-        )
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        if not room_type:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Нужно выбрать тип аудитории.",
+            )
             return
 
-        number, types, cap = dlg.values()
-        if not number:
-            QMessageBox.warning(self, "Проверка", "Номер аудитории не может быть пустым.")
-            return
-        if not types:
-            QMessageBox.warning(self, "Проверка", "Выберите хотя бы один тип аудитории.")
+        if int(capacity) <= 0:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Вместимость должна быть больше 0.",
+            )
             return
 
         try:
-            self.rooms_repo.update(
-                id_room=rid,
-                room_number=number,
-                room_type=types_to_csv(types),
-                capacity=cap,
+            self._rooms_repo.create(
+                room_number=room_number,
+                room_type=room_type,
+                capacity=int(capacity),
                 building=None,
             )
-            self.refresh()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось добавить аудиторию:\n{exc}",
+            )
+            return
 
-    def delete_room(self):
-        rid = self._selected_id()
-        if rid is None:
-            QMessageBox.warning(self, "Нет выбора", "Выберите аудиторию.")
+        self.refresh()
+        self._set_status(f"Аудитория '{room_number}' добавлена.")
+
+    def _edit_room(self) -> None:
+        room_id = self._selected_room_id()
+        if room_id is None:
+            QMessageBox.information(self, "Не выбрано", "Сначала выберите аудиторию.")
+            return
+
+        room = self._rooms_repo.get_by_id(int(room_id))
+        if room is None:
+            QMessageBox.warning(self, "Ошибка", "Аудитория не найдена.")
+            self.refresh()
+            return
+
+        dlg = RoomEditDialog(self, room=room)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        room_number, room_type, capacity = dlg.get_data()
+
+        if not room_number:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Номер или название аудитории не может быть пустым.",
+            )
+            return
+
+        if not room_type:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Нужно выбрать тип аудитории.",
+            )
+            return
+
+        if int(capacity) <= 0:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Вместимость должна быть больше 0.",
+            )
             return
 
         try:
-            self.rooms_repo.delete(rid)
-            self.refresh()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
+            self._rooms_repo.update(
+                id_room=int(room_id),
+                room_number=room_number,
+                room_type=room_type,
+                capacity=int(capacity),
+                building=None,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось сохранить изменения аудитории:\n{exc}",
+            )
+            return
+
+        self.refresh()
+        self._set_status(f"Аудитория '{room_number}' обновлена.")
+
+    def _delete_room(self) -> None:
+        room_id = self._selected_room_id()
+        if room_id is None:
+            QMessageBox.information(self, "Не выбрано", "Сначала выберите аудиторию.")
+            return
+
+        room = self._rooms_repo.get_by_id(int(room_id))
+        room_name = (
+            getattr(room, "room_number", f"id={room_id}") if room else f"id={room_id}"
+        )
+
+        answer = QMessageBox.question(
+            self,
+            "Подтверждение удаления",
+            f"Удалить аудиторию '{room_name}'?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self._rooms_repo.delete(int(room_id))
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось удалить аудиторию:\n{exc}",
+            )
+            return
+
+        self.refresh()
+        self._set_status(f"Аудитория '{room_name}' удалена.")
+
+    def refresh(self) -> None:
+        try:
+            rows = self._rooms_repo.list_all()
+        except Exception as exc:
+            self.table.setRowCount(0)
+            self._set_status(f"Не удалось загрузить аудитории: {exc}", error=True)
+            return
+
+        self.table.setRowCount(0)
+
+        for row_idx, room in enumerate(rows):
+            self.table.insertRow(row_idx)
+
+            id_room = int(getattr(room, "id_room", 0))
+            room_number = str(getattr(room, "room_number", "") or "")
+            room_type = str(getattr(room, "room_type", "") or "")
+            capacity = int(getattr(room, "capacity", 0) or 0)
+
+            id_item = QTableWidgetItem(str(id_room))
+            id_item.setData(Qt.ItemDataRole.UserRole, id_room)
+
+            room_item = QTableWidgetItem(room_number)
+            type_item = QTableWidgetItem(self._room_type_label(room_type))
+            capacity_item = QTableWidgetItem(str(capacity))
+
+            self.table.setItem(row_idx, 0, id_item)
+            self.table.setItem(row_idx, 1, room_item)
+            self.table.setItem(row_idx, 2, type_item)
+            self.table.setItem(row_idx, 3, capacity_item)
+
+        self._set_status(f"Загружено аудиторий: {len(rows)}")

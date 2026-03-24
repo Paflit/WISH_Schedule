@@ -1,146 +1,97 @@
-"""
-DTO для передачи данных расписания между слоями.
-
-Назначение:
-- Presentation (GUI) НЕ должна работать с ORM-моделями.
-- Domain сущности тоже не должны утекать в UI напрямую.
-- Поэтому UseCase возвращает DTO-структуры.
-
-DTO — это "плоские" dataclass без бизнес-логики.
-
-Важно:
-- ScheduleEntryDTO теперь содержит id_schedule — реальный идентификатор записи
-  из таблицы ScheduleEntries.
-- event_id сохранён для совместимости со старой логикой и местами, где он уже
-  используется как ссылка на источник/событие генерации.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 
-# ------------------------------------------------------------
-# Справочные DTO
-# ------------------------------------------------------------
-
-@dataclass(frozen=True)
-class TeacherDTO:
-    id_teacher: int
-    full_name: str
-
-
-@dataclass(frozen=True)
-class GroupDTO:
-    id_group: int
-    group_name: str
-
-
-@dataclass(frozen=True)
-class RoomDTO:
-    id_room: int
-    room_number: str
-    room_type: str
-
-
-@dataclass(frozen=True)
-class SubjectDTO:
-    id_subject: int
-    subject_name: str
-
-
-# ------------------------------------------------------------
-# Расписание
-# ------------------------------------------------------------
-
-@dataclass(frozen=True)
+@dataclass(slots=True)
 class ScheduleEntryDTO:
     """
-    Одна запись расписания (одна сохранённая строка в ScheduleEntries).
+    DTO одной записи готового расписания.
 
-    Ключевые поля:
-    - id_schedule: реальный PK записи расписания в БД
-    - variant_id: вариант, к которому относится запись
-    - curriculum_id: ссылка на CurriculumItems
-    - event_id: логический идентификатор события/источника, не заменяет id_schedule
-    - slot_id: фактический слот, куда поставлено занятие
+    Важно:
+    - id_schedule — главный идентификатор записи в ScheduleEntries.
+    - event_id — идентификатор generation event, полезен для трассировки
+      и для lock/re-generation сценариев, но не должен использоваться
+      как основной ключ редактирования.
     """
+
     id_schedule: int
     variant_id: int
-
-    # Ссылка на учебный план
     curriculum_id: int
-
-    # Для совместимости со старой логикой
     event_id: int
 
-    # Фактическая привязка
     slot_id: int
-
-    # Позиция в сетке расписания
     week_number: int
     week_type: int
     day_of_week: int
     pair_number: int
 
-    # Группа
     group_id: int
     group_name: str
 
-    # Преподаватель
     teacher_id: int
     teacher_name: str
 
-    # Предмет
     subject_id: int
     subject_name: str
     part_type: str
 
-    # Аудитория
     room_id: int
     room_number: str
 
-    # Признаки
     is_locked: bool = False
 
+    @property
+    def display_title(self) -> str:
+        parts = [self.subject_name]
+        if self.part_type:
+            parts.append(f"({self.part_type})")
+        return " ".join(p for p in parts if p).strip()
 
-@dataclass(frozen=True)
+    @property
+    def display_subtitle(self) -> str:
+        parts = [self.group_name, self.teacher_name, self.room_number]
+        return " | ".join(p for p in parts if p).strip()
+
+    @property
+    def has_week_binding(self) -> bool:
+        return self.week_number > 0 or self.week_type > 0
+
+
+@dataclass(slots=True)
 class ScheduleVariantDTO:
     """
-    Один вариант расписания.
+    DTO варианта расписания.
     """
+
     id_variant: int
     name: str
-    objective_score: int
-    entries: List[ScheduleEntryDTO] = field(default_factory=list)
+    objective_score: int = 0
+    entries: list[ScheduleEntryDTO] = field(default_factory=list)
+
+    @property
+    def entries_count(self) -> int:
+        return len(self.entries)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.entries
 
 
-# ------------------------------------------------------------
-# Метрики для UI
-# ------------------------------------------------------------
-
-@dataclass(frozen=True)
-class ScheduleMetricsDTO:
-    """
-    Метрики варианта для отображения в GUI.
-    """
-    total_penalty: int
-
-    student_gaps: int
-    teacher_gaps: int
-
-    student_overloads: int
-    teacher_overloads: int
-
-    method_day_violations: int
-
-    lecture_late_penalty: int
-
-
-@dataclass(frozen=True)
+@dataclass(slots=True)
 class GenerationResultDTO:
     """
-    Результат генерации (несколько вариантов).
+    DTO результата генерации расписания.
     """
-    variants: List[ScheduleVariantDTO] = field(default_factory=list)
+
+    variants: list[ScheduleVariantDTO] = field(default_factory=list)
+    message: Optional[str] = None
+
+    @property
+    def variants_count(self) -> int:
+        return len(self.variants)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.variants

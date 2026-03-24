@@ -2,248 +2,404 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
-from typing import Optional
 
-from PyQt6.QtCore import QProcess
+from PyQt6.QtCore import QProcess, Qt
 from PyQt6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QPushButton,
-    QLabel,
+    QCheckBox,
     QComboBox,
-    QMessageBox,
     QDialog,
-    QFormLayout,
-    QLineEdit,
     QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QPlainTextEdit,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QHeaderView,
 )
 
-from app.application.use_cases.save_variant import SaveVariantCommand
+from app.presentation.widgets.metrics_panel import MetricsPanel
 
-class ApproveGeneratedDialog(QDialog):
-    def __init__(self, current_name: str, parent=None):
+
+class CreateCalendarDialog(QDialog):
+    """
+    Диалог создания нового семестра / календаря.
+    """
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Утверждение варианта")
-        self.setMinimumWidth(420)
+        self.setWindowTitle("Добавление семестра")
+        self.resize(420, 220)
 
-        layout = QFormLayout(self)
-        self.name_edit = QLineEdit()
-        self.name_edit.setText(current_name)
-        layout.addRow("Новое название:", self.name_edit)
+        root = QVBoxLayout(self)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
+        form = QFormLayout()
+        root.addLayout(form)
+
+        self.academic_year_combo = QComboBox()
+        self.academic_year_combo.setEditable(True)
+        self.academic_year_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.academic_year_combo.addItems(
+            [
+                "2025/2026",
+                "2026/2027",
+                "2027/2028",
+            ]
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        form.addRow("Учебный год:", self.academic_year_combo)
 
-    def values(self):
-        return self.name_edit.text().strip()
+        self.semester_combo = QComboBox()
+        self.semester_combo.addItem("1 семестр", 1)
+        self.semester_combo.addItem("2 семестр", 2)
+        form.addRow("Семестр:", self.semester_combo)
+
+        self.include_saturday = QCheckBox("Включить субботу")
+        form.addRow("", self.include_saturday)
+
+        self.pairs_per_day_spin = QSpinBox()
+        self.pairs_per_day_spin.setRange(1, 12)
+        self.pairs_per_day_spin.setValue(8)
+        form.addRow("Пар в день:", self.pairs_per_day_spin)
+
+        self.weeks_in_semester_spin = QSpinBox()
+        self.weeks_in_semester_spin.setRange(1, 30)
+        self.weeks_in_semester_spin.setValue(18)
+        form.addRow("Недель в семестре:", self.weeks_in_semester_spin)
+
+        hint = QLabel(
+            "Новый семестр будет создан только если в базе ещё нет "
+            "такой комбинации учебного года и номера семестра."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #667085;")
+        root.addWidget(hint)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        root.addWidget(self.button_box)
+
+    def get_data(self) -> dict:
+        return {
+            "academic_year": self.academic_year_combo.currentText().strip(),
+            "semester": int(self.semester_combo.currentData()),
+            "include_saturday": bool(self.include_saturday.isChecked()),
+            "pairs_per_day": int(self.pairs_per_day_spin.value()),
+            "weeks_in_semester": int(self.weeks_in_semester_spin.value()),
+        }
 
 
 class GeneratePage(QWidget):
-    DEFAULT_TIME_LIMIT_SECONDS = 120
+    """
+    Страница генерации расписания.
+
+    Актуальная логика:
+    - пользователь выбирает календарь;
+    - лимит времени не меняется из UI;
+    - генерация запускается в отдельном worker-процессе;
+    - количество вариантов пользователь не задаёт;
+    - UI получает progress/done/error из stdout worker.
+
+    Сейчас страница запускает генерацию одного итогового варианта
+    с фиксированным лимитом времени 600 секунд.
+    """
+
     DEFAULT_VARIANTS_COUNT = 1
+    DEFAULT_TIME_LIMIT_SECONDS = 600
 
-    def __init__(self, container, open_variant_callback=None):
+    def __init__(self, calendar_repo, schedule_repo):
         super().__init__()
-        self.container = container
-        self.open_variant_callback = open_variant_callback
+        self._calendar_repo = calendar_repo
+        self._schedule_repo = schedule_repo
 
-        self.calendar_repo = container.calendar_repo
-        self.curriculum_repo = container.curriculum_repo
-        self.save_variant_uc = container.save_variant_uc
-        self.schedule_repo = container.schedule_repo
-
-        self._process: Optional[QProcess] = None
+        self._process: QProcess | None = None
         self._stdout_buffer = ""
-        self._stderr_buffer = ""
-        self._last_result_payload: Optional[dict] = None
-        self._last_error_payload: Optional[dict] = None
+        self._current_variant_ids: list[int] = []
 
-        self._generated_variant: Optional[dict] = None
+        root = QVBoxLayout(self)
 
-        self._init_ui()
-        self._load_calendars()
-        self._on_calendar_changed()
+        title = QLabel("Генерация расписания")
+        title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        root.addWidget(title)
 
-    def _init_ui(self):
-        layout = QVBoxLayout()
+        subtitle = QLabel(
+            "Генерация строит согласованное расписание для выбранного календаря "
+            "в отдельном процессе."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #5f6b7a;")
+        root.addWidget(subtitle)
 
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Полугодие:"))
+        form = QFormLayout()
+        root.addLayout(form)
+
+        calendar_row = QHBoxLayout()
         self.calendar_combo = QComboBox()
-        row1.addWidget(self.calendar_combo)
-        row1.addStretch()
-        layout.addLayout(row1)
+        calendar_row.addWidget(self.calendar_combo)
 
-        row2 = QHBoxLayout()
-        self.generate_button = QPushButton("Сгенерировать расписание")
-        self.cancel_button = QPushButton("Отменить генерацию")
-        self.cancel_button.setEnabled(False)
+        self.add_calendar_btn = QPushButton("+")
+        self.add_calendar_btn.setFixedWidth(32)
+        self.add_calendar_btn.setToolTip("Добавить семестр")
+        calendar_row.addWidget(self.add_calendar_btn)
 
-        row2.addWidget(self.generate_button)
-        row2.addWidget(self.cancel_button)
-        row2.addStretch()
-        layout.addLayout(row2)
+        calendar_row_widget = QWidget()
+        calendar_row_widget.setLayout(calendar_row)
 
-        row3 = QHBoxLayout()
-        row3.addWidget(QLabel("Сгенерированный вариант:"))
-        self.generated_variant_combo = QComboBox()
-        self.generated_variant_combo.setEnabled(False)
+        form.addRow("Календарь:", calendar_row_widget)
 
-        self.preview_button = QPushButton("Предпросмотр")
-        self.preview_button.setEnabled(False)
+        info_label = QLabel(
+            "Количество вариантов не задаётся пользователем. "
+            "Система формирует один итоговый вариант.\n"
+            f"Лимит времени генерации фиксирован: {self.DEFAULT_TIME_LIMIT_SECONDS} сек."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #667085;")
+        root.addWidget(info_label)
 
-        self.open_button = QPushButton("Открыть в просмотре")
-        self.open_button.setEnabled(False)
+        buttons = QHBoxLayout()
+        root.addLayout(buttons)
 
-        self.approve_button = QPushButton("Утвердить и переименовать")
-        self.approve_button.setEnabled(False)
+        self.generate_btn = QPushButton("Запустить генерацию")
+        self.refresh_btn = QPushButton("Обновить список календарей")
+        self.open_variant_btn = QPushButton("Открыть выбранный вариант")
+        self.open_variant_btn.setEnabled(False)
 
-        row3.addWidget(self.generated_variant_combo)
-        row3.addWidget(self.preview_button)
-        row3.addWidget(self.open_button)
-        row3.addWidget(self.approve_button)
-        row3.addStretch()
-        layout.addLayout(row3)
+        buttons.addWidget(self.generate_btn)
+        buttons.addWidget(self.refresh_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(self.open_variant_btn)
 
-        self.info_label = QLabel("")
-        self.info_label.setWordWrap(True)
-        layout.addWidget(self.info_label)
+        self.status_label = QLabel("Выберите календарь и запустите генерацию.")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("font-weight: 500;")
+        root.addWidget(self.status_label)
 
-        self.result_label = QLabel("Выберите полугодие и запустите генерацию.")
-        self.result_label.setWordWrap(True)
-        layout.addWidget(self.result_label)
+        self.metrics_panel = MetricsPanel()
+        root.addWidget(self.metrics_panel)
 
-        self.setLayout(layout)
+        variants_title = QLabel("Результат генерации")
+        variants_title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        root.addWidget(variants_title)
 
-        self.generate_button.clicked.connect(self._on_generate)
-        self.cancel_button.clicked.connect(self._on_cancel)
-        self.calendar_combo.currentIndexChanged.connect(self._on_calendar_changed)
-        self.generated_variant_combo.currentIndexChanged.connect(self._on_generated_selected)
-        self.preview_button.clicked.connect(self._preview_selected_variant)
-        self.open_button.clicked.connect(self._open_selected_variant)
-        self.approve_button.clicked.connect(self._approve_selected_variant)
+        self.variants_table = QTableWidget(0, 4)
+        self.variants_table.setHorizontalHeaderLabels(
+            ["ID", "Название", "Score", "Записей"]
+        )
+        self.variants_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.variants_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self.variants_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.variants_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.variants_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.variants_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.variants_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        root.addWidget(self.variants_table, 1)
 
-    def _get_calendar_plan_stats(self, calendar_id: int) -> tuple[int, int]:
+        log_title = QLabel("Ход генерации")
+        log_title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        root.addWidget(log_title)
+
+        self.log_output = QPlainTextEdit()
+        self.log_output.setReadOnly(True)
+        self.log_output.setPlaceholderText("Здесь будет отображаться ход генерации…")
+        root.addWidget(self.log_output, 1)
+
+        self.generate_btn.clicked.connect(self._start_generation)
+        self.refresh_btn.clicked.connect(self._load_calendars)
+        self.open_variant_btn.clicked.connect(self._open_selected_variant)
+        self.variants_table.itemSelectionChanged.connect(self._sync_open_button_state)
+        self.add_calendar_btn.clicked.connect(self._create_calendar_dialog)
+
+        self._load_calendars()
+        self._load_recent_variants()
+
+    # ---------------------------------------------------------
+    # Calendar helpers
+    # ---------------------------------------------------------
+    def _select_calendar_by_id(self, calendar_id: int) -> None:
+        idx = self.calendar_combo.findData(int(calendar_id))
+        if idx >= 0:
+            self.calendar_combo.setCurrentIndex(idx)
+
+    def _offer_create_calendar_if_empty(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Календари отсутствуют",
+            "В базе нет ни одного семестра.\nСоздать новый семестр сейчас?",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._create_calendar_dialog()
+
+    def _create_calendar_dialog(self) -> None:
+        dlg = CreateCalendarDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        data = dlg.get_data()
+
+        if not data["academic_year"]:
+            QMessageBox.warning(self, "Ошибка", "Учебный год не может быть пустым.")
+            return
+
         try:
-            plans = self.curriculum_repo.get_semester_plans(int(calendar_id))
-        except Exception:
-            return 0, 0
+            calendar_id = self._calendar_repo.create_calendar(
+                academic_year=str(data["academic_year"]),
+                semester=int(data["semester"]),
+                include_saturday=bool(data["include_saturday"]),
+                pairs_per_day=int(data["pairs_per_day"]),
+                weeks_in_semester=int(data["weeks_in_semester"]),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось создать семестр:\n{exc}",
+            )
+            return
 
-        valid = [p for p in plans if int(getattr(p, "hours_in_semester", 0) or 0) > 0]
-        total_hours = sum(int(getattr(p, "hours_in_semester", 0) or 0) for p in valid)
-        return len(valid), total_hours
+        self._load_calendars()
+        self._select_calendar_by_id(int(calendar_id))
+        self._load_recent_variants(calendar_id=int(calendar_id))
+        self._set_status("Семестр успешно создан.")
 
-    def _load_calendars(self):
+    # ---------------------------------------------------------
+    # Load data
+    # ---------------------------------------------------------
+    def _load_calendars(self) -> None:
         self.calendar_combo.clear()
-        calendars = self.calendar_repo.list_all()
-        calendars = sorted(
-            calendars,
-            key=lambda x: (
-                str(getattr(x, "academic_year", "")),
-                int(getattr(x, "semester", 0)),
-                int(getattr(x, "id_calendar", 0)),
+
+        try:
+            calendars = self._calendar_repo.list_calendars()
+        except Exception as exc:
+            self._set_status(f"Не удалось загрузить календари: {exc}", error=True)
+            return
+
+        for cal in calendars:
+            label = (
+                f"{getattr(cal, 'academic_year', '')} | "
+                f"семестр {getattr(cal, 'semester', '')} "
+                f"(id={getattr(cal, 'id_calendar', '')})"
             )
-        )
-        for c in calendars:
-            self.calendar_combo.addItem(
-                f"{c.academic_year} / Полугодие {c.semester}",
-                userData=int(c.id_calendar),
+            self.calendar_combo.addItem(label, int(cal.id_calendar))
+
+        if self.calendar_combo.count() == 0:
+            self._set_status("Календари не найдены.", error=True)
+            self._offer_create_calendar_if_empty()
+        else:
+            self._set_status("Календари загружены.")
+
+    def _load_recent_variants(self, calendar_id: int | None = None) -> None:
+        try:
+            variants = self._schedule_repo.list_variants(calendar_id=calendar_id)
+        except Exception as exc:
+            self._append_log(f"[error] Не удалось загрузить варианты: {exc}")
+            return
+
+        rows = []
+        for variant in variants[:50]:
+            variant_id = int(getattr(variant, "id_variant", 0) or 0)
+            try:
+                dto = self._schedule_repo.get_variant_dto(variant_id)
+                entries_count = len(getattr(dto, "entries", []) or [])
+            except Exception:
+                entries_count = 0
+
+            rows.append(
+                {
+                    "id_variant": variant_id,
+                    "name": str(getattr(variant, "name", "") or ""),
+                    "objective_score": int(getattr(variant, "objective_score", 0) or 0),
+                    "entries_count": entries_count,
+                }
             )
 
-    def _on_calendar_changed(self):
+        self._fill_variants_table(rows)
+
+    # ---------------------------------------------------------
+    # Worker lifecycle
+    # ---------------------------------------------------------
+    def _start_generation(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.ProcessState.NotRunning:
+            QMessageBox.information(
+                self,
+                "Генерация уже идёт",
+                "Дождитесь завершения текущей генерации.",
+            )
+            return
+
         calendar_id = self.calendar_combo.currentData()
-        if not calendar_id:
-            self.info_label.setText("Полугодие не выбрано.")
+        if calendar_id is None:
+            QMessageBox.warning(self, "Нет календаря", "Сначала выберите календарь.")
             return
 
-        plans_count, total_hours = self._get_calendar_plan_stats(int(calendar_id))
-        self.info_label.setText(
-            f"Для выбранного полугодия найдено дисциплин/частей плана с часами: {plans_count}. "
-            f"Суммарные часы: {total_hours}."
+        variants_count = self.DEFAULT_VARIANTS_COUNT
+        time_limit_seconds = self.DEFAULT_TIME_LIMIT_SECONDS
+
+        self._current_variant_ids = []
+        self._fill_variants_table([])
+        self.metrics_panel.set_metrics({})
+
+        self.log_output.clear()
+        self._append_log(
+            f"[start] calendar_id={int(calendar_id)}, "
+            f"variants_count={variants_count}, "
+            f"time_limit_seconds={time_limit_seconds}"
         )
 
-    def _set_busy(self, busy: bool):
-        self.generate_button.setEnabled(not busy)
-        self.cancel_button.setEnabled(busy)
-        self.calendar_combo.setEnabled(not busy)
+        self._set_running_state(True)
+        self._set_status("Генерация запущена…")
 
-    def _reload_generated_combo(self):
-        self.generated_variant_combo.blockSignals(True)
-        self.generated_variant_combo.clear()
-
-        if self._generated_variant is not None:
-            self.generated_variant_combo.addItem(
-                f"{self._generated_variant['name']}",
-                userData=int(self._generated_variant["variant_id"]),
-            )
-
-        self.generated_variant_combo.blockSignals(False)
-
-        has_item = self.generated_variant_combo.count() > 0
-        self.generated_variant_combo.setEnabled(has_item)
-        self.preview_button.setEnabled(has_item)
-        self.open_button.setEnabled(has_item)
-        self.approve_button.setEnabled(has_item)
-
-        if has_item:
-            self.generated_variant_combo.setCurrentIndex(0)
-            self._on_generated_selected()
-
-    def _on_generated_selected(self):
-        if self._generated_variant is None:
-            return
-
-        self.result_label.setText(
-            f"Вариант: {self._generated_variant['name']}\n"
-            f"ID варианта: {self._generated_variant['variant_id']}\n"
-            f"Score: {self._generated_variant['score']}\n"
-            f"Записей: {self._generated_variant['entries_count']}"
-        )
-
-    def _start_process(self, *, calendar_id: int, variants_count: int, time_limit_seconds: int):
         self._stdout_buffer = ""
-        self._stderr_buffer = ""
-        self._last_result_payload = None
-        self._last_error_payload = None
+        self._process = QProcess(self)
+        self._process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
 
-        process = QProcess(self)
-        self._process = process
+        self._process.readyReadStandardOutput.connect(self._on_stdout_ready)
+        self._process.readyReadStandardError.connect(self._on_stderr_ready)
+        self._process.finished.connect(self._on_process_finished)
 
-        project_root = Path(__file__).resolve().parents[3]
-        process.setWorkingDirectory(str(project_root))
-        process.setProgram(sys.executable)
-        process.setArguments([
-            "-u",
+        program = sys.executable
+        args = [
             "-m",
             "app.presentation.workers.generate_worker",
-            str(calendar_id),
-            str(variants_count),
-            str(time_limit_seconds),
-        ])
+            str(int(calendar_id)),
+            str(int(variants_count)),
+            str(int(time_limit_seconds)),
+        ]
 
-        process.readyReadStandardOutput.connect(self._on_process_stdout)
-        process.readyReadStandardError.connect(self._on_process_stderr)
-        process.finished.connect(self._on_process_finished)
-        process.errorOccurred.connect(self._on_process_error)
+        self._process.start(program, args)
 
-        process.start()
-        if not process.waitForStarted(3000):
-            self._process = None
-            raise RuntimeError("Не удалось запустить процесс генерации.")
+        if not self._process.waitForStarted(3000):
+            self._set_running_state(False)
+            self._set_status("Не удалось запустить worker генерации.", error=True)
+            QMessageBox.critical(
+                self,
+                "Ошибка запуска",
+                "Не удалось запустить процесс генерации.",
+            )
 
-    def _on_process_stdout(self):
+    def _on_stdout_ready(self) -> None:
         if self._process is None:
             return
 
-        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        self._stdout_buffer += data
+        chunk = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        if not chunk:
+            return
+
+        self._stdout_buffer += chunk
 
         while "\n" in self._stdout_buffer:
             line, self._stdout_buffer = self._stdout_buffer.split("\n", 1)
@@ -253,163 +409,221 @@ class GeneratePage(QWidget):
 
             try:
                 payload = json.loads(line)
-            except json.JSONDecodeError:
-                self.result_label.setText(f"Лог: {line}")
+            except Exception:
+                self._append_log(line)
                 continue
 
-            self._handle_worker_payload(payload)
+            self._handle_worker_message(payload)
 
-    def _on_process_stderr(self):
+    def _on_stderr_ready(self) -> None:
         if self._process is None:
             return
-        data = bytes(self._process.readAllStandardError()).decode("utf-8", errors="replace")
-        self._stderr_buffer += data
 
-    def _handle_worker_payload(self, payload: dict):
-        msg_type = payload.get("type")
-
-        if msg_type == "progress":
-            self.result_label.setText(str(payload.get("message", "Идёт генерация...")))
+        chunk = bytes(self._process.readAllStandardError()).decode("utf-8", errors="replace")
+        if not chunk:
             return
 
-        if msg_type == "result":
-            self._last_result_payload = payload
+        for line in chunk.splitlines():
+            line = line.strip()
+            if line:
+                self._append_log(f"[stderr] {line}")
 
-            variant_ids = payload.get("variant_ids", []) or []
-            variant_names = payload.get("variant_names", []) or []
+    def _on_process_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
+        self._set_running_state(False)
 
-            if variant_ids:
-                variant_id = int(variant_ids[0])
-                dto = self.schedule_repo.get_variant_dto(variant_id)
+        if self._stdout_buffer.strip():
+            for raw in self._stdout_buffer.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                    self._handle_worker_message(payload)
+                except Exception:
+                    self._append_log(line)
 
-                self._generated_variant = {
-                    "variant_id": variant_id,
-                    "name": variant_names[0] if variant_names else dto.name,
-                    "score": int(getattr(dto, "objective_score", 0) or 0),
-                    "entries_count": len(getattr(dto, "entries", []) or []),
-                }
-                self._reload_generated_combo()
+        self._stdout_buffer = ""
+
+        if exit_status != QProcess.ExitStatus.NormalExit:
+            self._set_status("Процесс генерации завершился аварийно.", error=True)
+            return
+
+        if exit_code != 0:
+            self._set_status("Генерация завершилась с ошибкой.", error=True)
+            return
+
+        self._set_status("Генерация завершена.")
+        selected_calendar_id = self.calendar_combo.currentData()
+        self._load_recent_variants(
+            calendar_id=int(selected_calendar_id) if selected_calendar_id is not None else None
+        )
+
+    # ---------------------------------------------------------
+    # Worker message handling
+    # ---------------------------------------------------------
+    def _handle_worker_message(self, payload: dict) -> None:
+        msg_type = str(payload.get("type", "") or "").strip()
+
+        if msg_type == "started":
+            self._append_log(
+                "[worker] "
+                f"Запущен: calendar_id={payload.get('calendar_id')}, "
+                f"variants_count={payload.get('variants_count')}, "
+                f"time_limit={payload.get('time_limit_seconds')} сек"
+            )
+            return
+
+        if msg_type == "progress":
+            stage = str(payload.get("stage", "") or "")
+            data = payload.get("data", {}) or {}
+            self._append_log(self._format_progress(stage, data))
+            self._set_status(self._human_stage(stage))
+            return
+
+        if msg_type == "done":
+            variants = list(payload.get("variants", []) or [])
+            self._current_variant_ids = [
+                int(v.get("id_variant", 0) or 0) for v in variants if int(v.get("id_variant", 0) or 0) > 0
+            ]
+            self._fill_variants_table(variants)
+
+            if variants:
+                best = min(
+                    variants,
+                    key=lambda x: int(x.get("objective_score", 0) or 0),
+                )
+                self.metrics_panel.set_metrics(
+                    {
+                        "variants_count": int(payload.get("variants_count", len(variants)) or len(variants)),
+                        "best_variant_id": int(best.get("id_variant", 0) or 0),
+                        "best_objective_score": int(best.get("objective_score", 0) or 0),
+                        "best_entries_count": int(best.get("entries_count", 0) or 0),
+                    }
+                )
+            else:
+                self.metrics_panel.set_metrics(
+                    {"variants_count": int(payload.get("variants_count", 0) or 0)}
+                )
+
+            self._append_log(
+                f"[done] Найдено вариантов: {int(payload.get('variants_count', len(variants)) or len(variants))}"
+            )
+            self._set_status("Генерация завершена.")
             return
 
         if msg_type == "error":
-            self._last_error_payload = payload
-            message = str(payload.get("message", "Неизвестная ошибка"))
-            tb = str(payload.get("traceback", "") or "")
-            QMessageBox.critical(self, "Ошибка генерации", f"{message}\n\n{tb}" if tb else message)
-
-    def _on_process_finished(self, exit_code: int, exit_status):
-        self._set_busy(False)
-        self._process = None
-
-        if self._last_error_payload is not None:
-            self.result_label.setText(f"Генерация завершилась с ошибкой. Код: {exit_code}")
+            message = str(payload.get("message", "") or "Неизвестная ошибка.")
+            details = str(payload.get("details", "") or "")
+            self._append_log(f"[error] {message}")
+            if details:
+                self._append_log(details)
+            self._set_status(message, error=True)
             return
 
-        if exit_status == QProcess.ExitStatus.CrashExit:
-            QMessageBox.critical(self, "Критический сбой", "Процесс генерации аварийно завершился.")
-            self.result_label.setText("Процесс генерации аварийно завершился.")
-            return
+        self._append_log(json.dumps(payload, ensure_ascii=False))
 
-        if self._last_result_payload is not None:
+    # ---------------------------------------------------------
+    # Table / selection
+    # ---------------------------------------------------------
+    def _fill_variants_table(self, variants: list[dict]) -> None:
+        self.variants_table.setRowCount(0)
+
+        for row_idx, variant in enumerate(variants):
+            self.variants_table.insertRow(row_idx)
+
+            id_variant = int(variant.get("id_variant", 0) or 0)
+            name = str(variant.get("name", "") or "")
+            score = int(variant.get("objective_score", 0) or 0)
+            entries_count = int(variant.get("entries_count", 0) or 0)
+
+            id_item = QTableWidgetItem(str(id_variant))
+            id_item.setData(Qt.ItemDataRole.UserRole, id_variant)
+
+            self.variants_table.setItem(row_idx, 0, id_item)
+            self.variants_table.setItem(row_idx, 1, QTableWidgetItem(name))
+            self.variants_table.setItem(row_idx, 2, QTableWidgetItem(str(score)))
+            self.variants_table.setItem(row_idx, 3, QTableWidgetItem(str(entries_count)))
+
+        self._sync_open_button_state()
+
+    def _selected_variant_id(self) -> int | None:
+        selected = self.variants_table.selectedItems()
+        if not selected:
+            return None
+
+        row = selected[0].row()
+        item = self.variants_table.item(row, 0)
+        if item is None:
+            return None
+
+        value = item.data(Qt.ItemDataRole.UserRole)
+        if value is None:
+            return None
+
+        return int(value)
+
+    def _sync_open_button_state(self) -> None:
+        self.open_variant_btn.setEnabled(self._selected_variant_id() is not None)
+
+    def _open_selected_variant(self) -> None:
+        variant_id = self._selected_variant_id()
+        if variant_id is None:
             QMessageBox.information(
                 self,
-                "Готово",
-                "Вариант сгенерирован. Теперь можно просмотреть, открыть и утвердить его на этой вкладке."
+                "Вариант не выбран",
+                "Сначала выберите вариант в таблице.",
             )
-
-    def _on_process_error(self, process_error):
-        self._set_busy(False)
-        self._process = None
-        QMessageBox.critical(self, "Ошибка запуска процесса", f"{process_error}")
-
-    def _on_generate(self):
-        if self._process is not None:
-            QMessageBox.information(self, "Генерация", "Генерация уже выполняется.")
             return
 
-        calendar_id = self.calendar_combo.currentData()
-        if not calendar_id:
-            QMessageBox.warning(self, "Нет полугодия", "Выберите полугодие.")
-            return
-
-        self._set_busy(True)
-        self.result_label.setText("Запуск внешнего процесса генерации...")
-        self._start_process(
-            calendar_id=int(calendar_id),
-            variants_count=self.DEFAULT_VARIANTS_COUNT,
-            time_limit_seconds=self.DEFAULT_TIME_LIMIT_SECONDS,
-        )
-
-    def _preview_selected_variant(self):
-        if self._generated_variant is None:
-            QMessageBox.warning(self, "Нет выбора", "Нет сгенерированного варианта.")
-            return
-
-        dto = self.schedule_repo.get_variant_dto(int(self._generated_variant["variant_id"]))
         QMessageBox.information(
             self,
-            "Предпросмотр варианта",
-            f"Название: {dto.name}\n"
-            f"ID: {dto.id_variant}\n"
-            f"Score: {dto.objective_score}\n"
-            f"Количество записей: {len(dto.entries)}"
+            "Вариант выбран",
+            f"Выбран вариант расписания id={int(variant_id)}.\n"
+            f"Дальнейшее открытие можно связать с экраном вариантов или редактором.",
         )
 
-    def _open_selected_variant(self):
-        if self._generated_variant is None:
-            QMessageBox.warning(self, "Нет выбора", "Нет сгенерированного варианта.")
-            return
+    # ---------------------------------------------------------
+    # UI helpers
+    # ---------------------------------------------------------
+    def _set_running_state(self, running: bool) -> None:
+        self.generate_btn.setEnabled(not running)
+        self.refresh_btn.setEnabled(not running)
+        self.calendar_combo.setEnabled(not running)
+        self.add_calendar_btn.setEnabled(not running)
 
-        variant_id = int(self._generated_variant["variant_id"])
-
-        if self.open_variant_callback is not None:
-            self.open_variant_callback(variant_id)
+    def _set_status(self, text: str, error: bool = False) -> None:
+        self.status_label.setText(text)
+        if error:
+            self.status_label.setStyleSheet("font-weight: 600; color: #b42318;")
         else:
-            QMessageBox.information(
-                self,
-                "Открытие недоступно",
-                "Не настроен переход к просмотру варианта."
-            )
+            self.status_label.setStyleSheet("font-weight: 500; color: #101828;")
 
-    def _approve_selected_variant(self):
-        if self._generated_variant is None:
-            QMessageBox.warning(self, "Нет выбора", "Нет варианта для утверждения.")
-            return
+    def _append_log(self, text: str) -> None:
+        self.log_output.appendPlainText(text)
 
-        dialog = ApproveGeneratedDialog(current_name=self._generated_variant["name"], parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+    def _human_stage(self, stage: str) -> str:
+        mapping = {
+            "start": "Подготовка генерации…",
+            "calendar_loaded": "Календарь загружен.",
+            "semester_plans_loaded": "Загружен semester plan.",
+            "weekly_plans_loaded": "Загружен weekly plan.",
+            "reference_data_loaded": "Загружены справочники.",
+            "curriculum_map_loaded": "Загружены элементы учебного плана.",
+            "rules_loaded": "Загружены правила генерации.",
+            "availability_loaded": "Загружена доступность преподавателей.",
+            "building_events": "Формирование событий генерации…",
+            "events_built": "События генерации построены.",
+            "solver_started": "Solver запущен…",
+            "solver_finished": "Solver завершил поиск.",
+            "saving_variant": "Сохранение варианта…",
+            "variant_saved": "Вариант сохранён.",
+            "done": "Генерация завершена.",
+        }
+        return mapping.get(stage, stage or "Обработка…")
 
-        new_name = dialog.values()
-        if not new_name:
-            QMessageBox.warning(self, "Пустое название", "Введите название варианта.")
-            return
+    def _format_progress(self, stage: str, data: dict) -> str:
+        if not data:
+            return f"[progress] {stage}"
 
-        cmd = SaveVariantCommand(
-            variant_id=int(self._generated_variant["variant_id"]),
-            name=new_name,
-            status="approved",
-        )
-        self.save_variant_uc.execute(cmd)
-
-        self._generated_variant["name"] = new_name
-        self._reload_generated_combo()
-        QMessageBox.information(self, "Успешно", "Вариант утверждён.")
-
-    def _on_cancel(self):
-        if self._process is None:
-            return
-        self._process.kill()
-        self._process.waitForFinished(3000)
-        self._process = None
-        self._set_busy(False)
-        self.result_label.setText("Генерация отменена пользователем.")
-
-    def closeEvent(self, event):
-        try:
-            if self._process is not None:
-                self._process.kill()
-                self._process.waitForFinished(3000)
-                self._process = None
-        finally:
-            super().closeEvent(event)
+        compact = ", ".join(f"{k}={v}" for k, v in data.items())
+        return f"[progress] {stage}: {compact}"

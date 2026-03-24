@@ -1,202 +1,321 @@
-# app/presentation/pages/groups_page.py
 from __future__ import annotations
 
+from typing import Optional
+
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QTableWidget, QTableWidgetItem, QMessageBox,
-    QDialog, QFormLayout, QLineEdit, QSpinBox, QComboBox, QDialogButtonBox
+    QAbstractItemView,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QHBoxLayout,
 )
 
-class GroupDialog(QDialog):
+
+class GroupEditDialog(QDialog):
     """
-    Диалог добавления/редактирования группы.
-    Курс выбирается строго из 1..5.
+    Диалог создания / редактирования учебной группы.
+
+    Актуальная модель:
+    - ID не вводится руками;
+    - курс задаётся через dropdown;
+    - количество студентов задаётся числом.
     """
 
-    def __init__(
-        self,
-        parent=None,
-        *,
-        title: str,
-        name_value: str = "",
-        year_value: int = 1,
-        quantity_value: int = 25,
-        education_form: str = "full-time",
-    ):
+    def __init__(self, parent, group: Optional[object] = None):
         super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumWidth(420)
+        self._group = group
 
-        layout = QFormLayout(self)
+        self.setWindowTitle(
+            "Редактирование группы" if group is not None else "Добавление группы"
+        )
+        self.resize(420, 200)
 
-        self.name_edit = QLineEdit()
-        self.name_edit.setText(name_value)
+        root = QVBoxLayout(self)
 
-        # Курс: только 1..5
-        self.year_combo = QComboBox()
-        for y in [1, 2, 3, 4, 5]:
-            self.year_combo.addItem(str(y), y)
+        form = QFormLayout()
+        root.addLayout(form)
 
-        # выставим текущий курс
-        try:
-            y = int(year_value)
-        except Exception:
-            y = 1
-        idx = self.year_combo.findData(y)
-        self.year_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.name_combo = QComboBox()
+        self.name_combo.setEditable(True)
+        self.name_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.name_combo.setPlaceholderText("Введите название группы")
+        form.addRow("Название группы:", self.name_combo)
 
-        self.qty_spin = QSpinBox()
-        self.qty_spin.setRange(1, 500)
-        self.qty_spin.setValue(int(quantity_value) if quantity_value else 25)
+        self.course_combo = QComboBox()
+        self.course_combo.addItem("—", None)
+        for year in range(1, 6):
+            self.course_combo.addItem(str(year), year)
+        form.addRow("Курс:", self.course_combo)
 
-        self.form_combo = QComboBox()
-        self.form_combo.addItem("очная (full-time)", "full-time")
-        self.form_combo.addItem("очно-заочная (part-time)", "part-time")
-        self.form_combo.addItem("заочная (distance)", "distance")
-        idx = self.form_combo.findData(education_form)
+        self.quantity_spin = QSpinBox()
+        self.quantity_spin.setRange(1, 1000)
+        self.quantity_spin.setValue(25)
+        form.addRow("Количество студентов:", self.quantity_spin)
+
+        hint = QLabel("ID группы создаётся автоматически базой данных.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #667085;")
+        root.addWidget(hint)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        root.addWidget(self.button_box)
+
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+        self._fill()
+
+    def _fill(self) -> None:
+        if self._group is None:
+            return
+
+        self.name_combo.addItem(str(getattr(self._group, "group_name", "") or ""))
+        self.name_combo.setCurrentText(str(getattr(self._group, "group_name", "") or ""))
+
+        year = getattr(self._group, "year", None)
+        idx = self.course_combo.findData(int(year) if year is not None else None)
         if idx >= 0:
-            self.form_combo.setCurrentIndex(idx)
+            self.course_combo.setCurrentIndex(idx)
 
-        layout.addRow("Группа:", self.name_edit)
-        layout.addRow("Курс:", self.year_combo)
-        layout.addRow("Количество студентов:", self.qty_spin)
-        layout.addRow("Форма обучения:", self.form_combo)
+        self.quantity_spin.setValue(int(getattr(self._group, "quantity", 25) or 25))
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
-
-    def values(self):
-        return (
-            self.name_edit.text().strip(),
-            int(self.year_combo.currentData()),          # всегда 1..5
-            int(self.qty_spin.value()),
-            str(self.form_combo.currentData()),
-        )
+    def get_data(self) -> tuple[str, Optional[int], int]:
+        group_name = self.name_combo.currentText().strip()
+        year = self.course_combo.currentData()
+        quantity = int(self.quantity_spin.value())
+        return group_name, year, quantity
 
 
 class GroupsPage(QWidget):
-    def __init__(self, container):
-        super().__init__()
-        self.container = container
-        self.groups_repo = container.groups_repo
+    """
+    Страница учебных групп.
 
-        self._init_ui()
+    Показывает:
+    - ID
+    - название группы
+    - курс
+    - количество студентов
+
+    Важно:
+    - ID не вводится вручную;
+    - курс задаётся через dropdown;
+    - при сохранении курс реально уходит в БД.
+    """
+
+    def __init__(self, groups_repo):
+        super().__init__()
+        self._groups_repo = groups_repo
+
+        root = QVBoxLayout(self)
+
+        toolbar = QHBoxLayout()
+        root.addLayout(toolbar)
+
+        toolbar.addStretch(1)
+
+        self.add_btn = QPushButton("Добавить")
+        self.edit_btn = QPushButton("Редактировать")
+        self.delete_btn = QPushButton("Удалить")
+        self.refresh_btn = QPushButton("Обновить")
+
+        toolbar.addWidget(self.add_btn)
+        toolbar.addWidget(self.edit_btn)
+        toolbar.addWidget(self.delete_btn)
+        toolbar.addWidget(self.refresh_btn)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            ["ID", "Название группы", "Курс", "Количество"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 70)
+        self.table.setColumnWidth(1, 240)
+        self.table.setColumnWidth(2, 90)
+        self.table.setColumnWidth(3, 110)
+        root.addWidget(self.table)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        root.addWidget(self.status_label)
+
+        self.add_btn.clicked.connect(self._add_group)
+        self.edit_btn.clicked.connect(self._edit_group)
+        self.delete_btn.clicked.connect(self._delete_group)
+        self.refresh_btn.clicked.connect(self.refresh)
+
         self.refresh()
 
-    def _init_ui(self):
-        layout = QVBoxLayout()
+    def _set_status(self, text: str, error: bool = False) -> None:
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(
+            "color: #b42318;" if error else "color: #344054;"
+        )
 
-        btn_layout = QHBoxLayout()
-        self.btn_refresh = QPushButton("Обновить")
-        self.btn_add = QPushButton("Добавить")
-        self.btn_edit = QPushButton("Редактировать")
-        self.btn_delete = QPushButton("Удалить")
-
-        btn_layout.addWidget(self.btn_refresh)
-        btn_layout.addWidget(self.btn_add)
-        btn_layout.addWidget(self.btn_edit)
-        btn_layout.addWidget(self.btn_delete)
-        layout.addLayout(btn_layout)
-
-        self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["ID", "Название", "Курс", "Количество"])
-        layout.addWidget(self.table)
-
-        self.setLayout(layout)
-
-        self.btn_refresh.clicked.connect(self.refresh)
-        self.btn_add.clicked.connect(self.add_group)
-        self.btn_edit.clicked.connect(self.edit_group)
-        self.btn_delete.clicked.connect(self.delete_group)
-
-    def refresh(self):
-        try:
-            groups = self.groups_repo.list_all()
-            self.table.setRowCount(len(groups))
-
-            for row, g in enumerate(groups):
-                self.table.setItem(row, 0, QTableWidgetItem(str(g.id_group)))
-                self.table.setItem(row, 1, QTableWidgetItem(g.group_name))
-                # курс теперь всегда число 1..5
-                self.table.setItem(row, 2, QTableWidgetItem("" if g.year is None else str(g.year)))
-                self.table.setItem(row, 3, QTableWidgetItem(str(g.quantity)))
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
-
-    def _selected_id(self) -> int | None:
+    def _selected_group_id(self) -> Optional[int]:
         row = self.table.currentRow()
         if row < 0:
             return None
         item = self.table.item(row, 0)
-        return int(item.text()) if item else None
+        if item is None:
+            return None
+        try:
+            return int(item.data(Qt.ItemDataRole.UserRole))
+        except (TypeError, ValueError):
+            return None
 
-    def add_group(self):
-        dlg = GroupDialog(self, title="Добавить группу", year_value=1, quantity_value=25)
+    def _add_group(self) -> None:
+        dlg = GroupEditDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        name, year, qty, form = dlg.values()
-        if not name:
-            QMessageBox.warning(self, "Проверка", "Название группы не может быть пустым.")
+        group_name, year, quantity = dlg.get_data()
+
+        if not group_name:
+            QMessageBox.warning(self, "Ошибка", "Название группы не может быть пустым.")
+            return
+
+        if int(quantity) <= 0:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Количество студентов должно быть больше 0.",
+            )
             return
 
         try:
-            self.groups_repo.create(group_name=name, year=year, quantity=qty, education_form=form)
+            self._groups_repo.create(
+                group_name=group_name,
+                year=int(year) if year is not None else None,
+                quantity=int(quantity),
+                education_form="full-time",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось добавить группу:\n{exc}")
+            return
+
+        self.refresh()
+        self._set_status(f"Группа '{group_name}' добавлена.")
+
+    def _edit_group(self) -> None:
+        group_id = self._selected_group_id()
+        if group_id is None:
+            QMessageBox.information(self, "Не выбрано", "Сначала выберите группу.")
+            return
+
+        group = self._groups_repo.get_by_id(int(group_id))
+        if group is None:
+            QMessageBox.warning(self, "Ошибка", "Группа не найдена.")
             self.refresh()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
-
-    def edit_group(self):
-        gid = self._selected_id()
-        if gid is None:
-            QMessageBox.warning(self, "Нет выбора", "Выберите группу.")
             return
 
-        row = self.table.currentRow()
-        name = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
-        year_txt = self.table.item(row, 2).text() if self.table.item(row, 2) else ""
-        try:
-            year = int(year_txt) if year_txt.strip() else 1
-        except Exception:
-            year = 1
-        qty = int(self.table.item(row, 3).text()) if self.table.item(row, 3) else 25
+        dlg = GroupEditDialog(self, group=group)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
 
-        # education_form не показываем в таблице, оставим full-time по умолчанию (можешь расширить позже)
-        dlg = GroupDialog(
+        group_name, year, quantity = dlg.get_data()
+
+        if not group_name:
+            QMessageBox.warning(self, "Ошибка", "Название группы не может быть пустым.")
+            return
+
+        if int(quantity) <= 0:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Количество студентов должно быть больше 0.",
+            )
+            return
+
+        try:
+            self._groups_repo.update(
+                id_group=int(group_id),
+                group_name=group_name,
+                year=int(year) if year is not None else None,
+                quantity=int(quantity),
+                education_form="full-time",
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось сохранить изменения группы:\n{exc}",
+            )
+            return
+
+        self.refresh()
+        self._set_status(f"Группа '{group_name}' обновлена.")
+
+    def _delete_group(self) -> None:
+        group_id = self._selected_group_id()
+        if group_id is None:
+            QMessageBox.information(self, "Не выбрано", "Сначала выберите группу.")
+            return
+
+        group = self._groups_repo.get_by_id(int(group_id))
+        group_name = getattr(group, "group_name", f"id={group_id}") if group else f"id={group_id}"
+
+        answer = QMessageBox.question(
             self,
-            title="Редактировать группу",
-            name_value=name,
-            year_value=year,
-            quantity_value=qty,
-            education_form="full-time",
+            "Подтверждение удаления",
+            f"Удалить группу '{group_name}'?",
         )
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        name, year, qty, form = dlg.values()
-        if not name:
-            QMessageBox.warning(self, "Проверка", "Название группы не может быть пустым.")
+        if answer != QMessageBox.StandardButton.Yes:
             return
 
         try:
-            self.groups_repo.update(id_group=gid, group_name=name, year=year, quantity=qty, education_form=form)
-            self.refresh()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
-
-    def delete_group(self):
-        gid = self._selected_id()
-        if gid is None:
-            QMessageBox.warning(self, "Нет выбора", "Выберите группу.")
+            self._groups_repo.delete(int(group_id))
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось удалить группу:\n{exc}")
             return
 
+        self.refresh()
+        self._set_status(f"Группа '{group_name}' удалена.")
+
+    def refresh(self) -> None:
         try:
-            self.groups_repo.delete(gid)
-            self.refresh()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
+            rows = self._groups_repo.list_all()
+        except Exception as exc:
+            self.table.setRowCount(0)
+            self._set_status(f"Не удалось загрузить группы: {exc}", error=True)
+            return
+
+        self.table.setRowCount(0)
+
+        for row_idx, group in enumerate(rows):
+            self.table.insertRow(row_idx)
+
+            id_group = int(getattr(group, "id_group", 0))
+            group_name = str(getattr(group, "group_name", "") or "")
+            year = getattr(group, "year", None)
+            quantity = int(getattr(group, "quantity", 0) or 0)
+
+            id_item = QTableWidgetItem(str(id_group))
+            id_item.setData(Qt.ItemDataRole.UserRole, id_group)
+
+            name_item = QTableWidgetItem(group_name)
+            year_item = QTableWidgetItem(str(year) if year is not None else "—")
+            quantity_item = QTableWidgetItem(str(quantity))
+
+            self.table.setItem(row_idx, 0, id_item)
+            self.table.setItem(row_idx, 1, name_item)
+            self.table.setItem(row_idx, 2, year_item)
+            self.table.setItem(row_idx, 3, quantity_item)
+
+        self._set_status(f"Загружено групп: {len(rows)}")

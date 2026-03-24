@@ -1,17 +1,25 @@
-from app.presentation.qt_app import run
-from app.di import build_container
+from __future__ import annotations
 
-def main():
+import sys
+
+from app.di import build_container
+from app.presentation.qt_app import run
+
+
+def main() -> int:
+    """
+    Финальная точка входа приложения.
+
+    Здесь остаются только:
+    - создание контейнера зависимостей;
+    - запуск UI.
+
+    Никакой автоматической правки БД / календаря / weekly plan на старте
+    здесь больше не выполняется.
+    """
     container = build_container()
-    container.calendar_repo.ensure_default_calendar(
-        academic_year="2025/2026",
-        include_saturday=False,
-        pairs_per_day=8,
-        weeks_in_semester=18,
-    )
-    container.curriculum_repo.rebuild_all_weekly_plans()
-    #create_desktop_shortcut("PracticWISH")
-    run(container)
+    return int(run(container))
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

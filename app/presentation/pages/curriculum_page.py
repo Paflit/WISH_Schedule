@@ -1,507 +1,759 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from typing import Optional
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QComboBox, QTableWidget, QTableWidgetItem,
-    QMessageBox, QDialog, QFormLayout, QLineEdit,
-    QSpinBox, QDialogButtonBox, QGridLayout, QGroupBox
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 
 
-@dataclass
-class PlanDialogResult:
-    group_id: int
-    subject_name: str
-    lec_h1: int; lec_h2: int
-    pr_h1: int; pr_h2: int
-    cpr_h1: int; cpr_h2: int
-    lab_h1: int; lab_h2: int
+PART_TYPE_LABELS = {
+    "lecture": "Лекция",
+    "practice": "Практика",
+    "computer_practice": "Компьютерная практика",
+    "lab": "Лабораторная",
+}
 
 
-class PlanEntryDialog(QDialog):
+class CreateCalendarDialog(QDialog):
     """
-    Диалог добавления/редактирования:
-    - группа + дисциплина
-    - сетка: 2 колонки (П1/П2) × 4 строки (лек/уч.практ/комп.практ/лаб)
+    Диалог создания нового семестра / календаря.
     """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Добавление семестра")
+        self.resize(420, 220)
+
+        root = QVBoxLayout(self)
+
+        form = QFormLayout()
+        root.addLayout(form)
+
+        self.academic_year_combo = QComboBox()
+        self.academic_year_combo.setEditable(True)
+        self.academic_year_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.academic_year_combo.addItems(
+            [
+                "2025/2026",
+                "2026/2027",
+                "2027/2028",
+            ]
+        )
+        form.addRow("Учебный год:", self.academic_year_combo)
+
+        self.semester_combo = QComboBox()
+        self.semester_combo.addItem("1 семестр", 1)
+        self.semester_combo.addItem("2 семестр", 2)
+        form.addRow("Семестр:", self.semester_combo)
+
+        self.include_saturday = QCheckBox("Включить субботу")
+        form.addRow("", self.include_saturday)
+
+        self.pairs_per_day_spin = QSpinBox()
+        self.pairs_per_day_spin.setRange(1, 12)
+        self.pairs_per_day_spin.setValue(8)
+        form.addRow("Пар в день:", self.pairs_per_day_spin)
+
+        self.weeks_in_semester_spin = QSpinBox()
+        self.weeks_in_semester_spin.setRange(1, 30)
+        self.weeks_in_semester_spin.setValue(18)
+        form.addRow("Недель в семестре:", self.weeks_in_semester_spin)
+
+        hint = QLabel(
+            "Новый семестр будет создан только если в базе ещё нет "
+            "такой комбинации учебного года и номера семестра."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #667085;")
+        root.addWidget(hint)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        root.addWidget(self.button_box)
+
+    def get_data(self) -> dict:
+        return {
+            "academic_year": self.academic_year_combo.currentText().strip(),
+            "semester": int(self.semester_combo.currentData()),
+            "include_saturday": bool(self.include_saturday.isChecked()),
+            "pairs_per_day": int(self.pairs_per_day_spin.value()),
+            "weeks_in_semester": int(self.weeks_in_semester_spin.value()),
+        }
+
+
+class CurriculumEditDialog(QDialog):
+    """
+    Диалог добавления / редактирования записи учебного плана.
+
+    Логика данных остаётся прежней:
+    - группа
+    - дисциплина
+    - тип занятия
+    - тип аудитории
+    - часы в семестре
+    - часы за год
+    - комментарий
+
+    Но в таблице часть полей не отображается.
+    """
+
+    PART_TYPES = [
+        ("Лекция", "lecture"),
+        ("Практика", "practice"),
+        ("Компьютерная практика", "computer_practice"),
+        ("Лабораторная", "lab"),
+    ]
+
+    ROOM_TYPES = [
+        ("Лекционная", "lecture"),
+        ("Обычная аудитория", "classroom"),
+        ("Компьютерный класс", "computer"),
+        ("Лаборатория", "lab"),
+    ]
 
     def __init__(
         self,
         parent,
         *,
-        title: str,
-        groups: list,
-        preset: PlanDialogResult | None = None,
-        enable_h1: bool = True,
-        enable_h2: bool = True,
+        groups_repo,
+        subjects_repo,
+        record: Optional[dict] = None,
     ):
         super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumWidth(680)
+        self._groups_repo = groups_repo
+        self._subjects_repo = subjects_repo
+        self._record = record or {}
+
+        self.setWindowTitle(
+            "Редактирование записи учебного плана"
+            if record
+            else "Добавление записи учебного плана"
+        )
+        self.resize(520, 380)
 
         root = QVBoxLayout(self)
 
         form = QFormLayout()
-        self.group_combo = QComboBox()
-        for g in groups:
-            self.group_combo.addItem(g.group_name, g.id_group)
-
-        self.subject_edit = QLineEdit()
-        self.subject_edit.setPlaceholderText("Например: Математика")
-
-        form.addRow("Группа:", self.group_combo)
-        form.addRow("Дисциплина:", self.subject_edit)
         root.addLayout(form)
 
-        box = QGroupBox("Часы по полугодиям")
-        grid = QGridLayout(box)
+        self.group_combo = QComboBox()
+        form.addRow("Группа:", self.group_combo)
 
-        def spin(disabled: bool = False):
-            s = QSpinBox()
-            s.setRange(0, 500)
-            s.setEnabled(not disabled)
-            return s
+        self.subject_combo = QComboBox()
+        self.subject_combo.setEditable(True)
+        self.subject_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        form.addRow("Дисциплина:", self.subject_combo)
 
-        grid.addWidget(QLabel(""), 0, 0)
-        grid.addWidget(QLabel("Полугодие 1"), 0, 1)
-        grid.addWidget(QLabel("Полугодие 2"), 0, 2)
+        self.part_type_combo = QComboBox()
+        for label, value in self.PART_TYPES:
+            self.part_type_combo.addItem(label, value)
+        form.addRow("Тип занятия:", self.part_type_combo)
 
-        grid.addWidget(QLabel("Лекция"), 1, 0)
-        self.lec_h1 = spin(disabled=not enable_h1)
-        self.lec_h2 = spin(disabled=not enable_h2)
-        grid.addWidget(self.lec_h1, 1, 1)
-        grid.addWidget(self.lec_h2, 1, 2)
+        self.room_type_combo = QComboBox()
+        for label, value in self.ROOM_TYPES:
+            self.room_type_combo.addItem(label, value)
+        form.addRow("Тип аудитории:", self.room_type_combo)
 
-        grid.addWidget(QLabel("Учебная практика"), 2, 0)
-        self.pr_h1 = spin(disabled=not enable_h1)
-        self.pr_h2 = spin(disabled=not enable_h2)
-        grid.addWidget(self.pr_h1, 2, 1)
-        grid.addWidget(self.pr_h2, 2, 2)
+        self.hours_semester_spin = QSpinBox()
+        self.hours_semester_spin.setRange(0, 2000)
+        self.hours_semester_spin.setValue(36)
+        form.addRow("Часы в семестре:", self.hours_semester_spin)
 
-        grid.addWidget(QLabel("Компьютерная практика"), 3, 0)
-        self.cpr_h1 = spin(disabled=not enable_h1)
-        self.cpr_h2 = spin(disabled=not enable_h2)
-        grid.addWidget(self.cpr_h1, 3, 1)
-        grid.addWidget(self.cpr_h2, 3, 2)
+        self.hours_year_spin = QSpinBox()
+        self.hours_year_spin.setRange(0, 4000)
+        self.hours_year_spin.setValue(72)
+        form.addRow("Часы за год:", self.hours_year_spin)
 
-        grid.addWidget(QLabel("Лабораторная"), 4, 0)
-        self.lab_h1 = spin(disabled=not enable_h1)
-        self.lab_h2 = spin(disabled=not enable_h2)
-        grid.addWidget(self.lab_h1, 4, 1)
-        grid.addWidget(self.lab_h2, 4, 2)
+        self.comment_combo = QComboBox()
+        self.comment_combo.setEditable(True)
+        self.comment_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        form.addRow("Комментарий:", self.comment_combo)
 
-        root.addWidget(box)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        hint = QLabel(
+            "В таблице скрыты технические поля: ID, тип аудитории, часы за год и комментарий."
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #667085;")
+        root.addWidget(hint)
 
-        if preset:
-            idx = self.group_combo.findData(preset.group_id)
-            if idx >= 0:
-                self.group_combo.setCurrentIndex(idx)
-
-            self.subject_edit.setText(preset.subject_name)
-
-            self.lec_h1.setValue(preset.lec_h1); self.lec_h2.setValue(preset.lec_h2)
-            self.pr_h1.setValue(preset.pr_h1); self.pr_h2.setValue(preset.pr_h2)
-            self.cpr_h1.setValue(preset.cpr_h1); self.cpr_h2.setValue(preset.cpr_h2)
-            self.lab_h1.setValue(preset.lab_h1); self.lab_h2.setValue(preset.lab_h2)
-
-    def result_data(self) -> PlanDialogResult:
-        return PlanDialogResult(
-            group_id=int(self.group_combo.currentData()),
-            subject_name=self.subject_edit.text().strip(),
-            lec_h1=int(self.lec_h1.value()), lec_h2=int(self.lec_h2.value()),
-            pr_h1=int(self.pr_h1.value()), pr_h2=int(self.pr_h2.value()),
-            cpr_h1=int(self.cpr_h1.value()), cpr_h2=int(self.cpr_h2.value()),
-            lab_h1=int(self.lab_h1.value()), lab_h2=int(self.lab_h2.value()),
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
+        root.addWidget(self.button_box)
+
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        self.part_type_combo.currentIndexChanged.connect(self._sync_default_room_type)
+
+        self._load_groups()
+        self._load_subjects()
+        self._fill()
+
+    def _load_groups(self) -> None:
+        self.group_combo.clear()
+        groups = self._groups_repo.list_all()
+        for group in groups:
+            label = f"{group.group_name} ({group.quantity} чел.)"
+            self.group_combo.addItem(label, int(group.id_group))
+
+    def _load_subjects(self) -> None:
+        self.subject_combo.clear()
+        subjects = self._subjects_repo.list_all()
+        for subj in subjects:
+            self.subject_combo.addItem(str(subj.subject_name), int(subj.id_subject))
+
+    def _sync_default_room_type(self) -> None:
+        part_type = self.part_type_combo.currentData()
+        mapping = {
+            "lecture": "lecture",
+            "practice": "classroom",
+            "computer_practice": "computer",
+            "lab": "lab",
+        }
+        room_type = mapping.get(str(part_type), "classroom")
+        idx = self.room_type_combo.findData(room_type)
+        if idx >= 0:
+            self.room_type_combo.setCurrentIndex(idx)
+
+    def _fill(self) -> None:
+        if not self._record:
+            self._sync_default_room_type()
+            return
+
+        group_id = self._record.get("group_id")
+        subject_name = str(self._record.get("subject_name", "") or "")
+        subject_id = self._record.get("subject_id")
+        part_type = str(self._record.get("part_type", "") or "")
+        room_type = str(self._record.get("required_room_type", "") or "")
+        hours_in_semester = int(self._record.get("hours_in_semester", 0) or 0)
+        hours_total_year = int(self._record.get("hours_total_year", 0) or 0)
+        comment = str(self._record.get("comment", "") or "")
+
+        idx = self.group_combo.findData(int(group_id) if group_id is not None else None)
+        if idx >= 0:
+            self.group_combo.setCurrentIndex(idx)
+
+        idx = self.subject_combo.findData(int(subject_id) if subject_id is not None else None)
+        if idx >= 0:
+            self.subject_combo.setCurrentIndex(idx)
+        elif subject_name:
+            self.subject_combo.addItem(subject_name, None)
+            self.subject_combo.setCurrentText(subject_name)
+
+        idx = self.part_type_combo.findData(part_type)
+        if idx >= 0:
+            self.part_type_combo.setCurrentIndex(idx)
+
+        idx = self.room_type_combo.findData(room_type)
+        if idx >= 0:
+            self.room_type_combo.setCurrentIndex(idx)
+
+        self.hours_semester_spin.setValue(hours_in_semester)
+        self.hours_year_spin.setValue(hours_total_year)
+
+        if comment:
+            self.comment_combo.addItem(comment)
+            self.comment_combo.setCurrentText(comment)
+
+    def get_data(self) -> dict:
+        return {
+            "group_id": self.group_combo.currentData(),
+            "subject_id": self.subject_combo.currentData(),
+            "subject_name": self.subject_combo.currentText().strip(),
+            "part_type": self.part_type_combo.currentData(),
+            "required_room_type": self.room_type_combo.currentData(),
+            "hours_in_semester": int(self.hours_semester_spin.value()),
+            "hours_total_year": int(self.hours_year_spin.value()),
+            "comment": self.comment_combo.currentText().strip() or None,
+        }
 
 
 class CurriculumPage(QWidget):
-    # columns
+    """
+    Страница учебного плана.
+
+    В таблице показываются только:
+    - группа
+    - дисциплина
+    - тип занятия
+    - часы/семестр
+
+    Технические поля:
+    - id_curriculum
+    - required_room_type
+    - hours_total_year
+    - comment
+
+    остаются в логике, но не отображаются в таблице.
+    """
+
     COL_GROUP = 0
     COL_SUBJECT = 1
-    COL_LEC_H1 = 2
-    COL_LEC_H2 = 3
-    COL_PR_H1 = 4
-    COL_PR_H2 = 5
-    COL_CPR_H1 = 6
-    COL_CPR_H2 = 7
-    COL_LAB_H1 = 8
-    COL_LAB_H2 = 9
-    COL_GID_HIDDEN = 10
-    COL_SUBJ_HIDDEN = 11
+    COL_PART_TYPE = 2
+    COL_HOURS_SEMESTER = 3
 
-    FILTER_H1 = "h1"
-    FILTER_H2 = "h2"
-    FILTER_BOTH = "both"
-
-    def __init__(self, container):
+    def __init__(self, curriculum_repo, groups_repo, subjects_repo, calendar_repo):
         super().__init__()
-        self.container = container
-        self.calendar_repo = container.calendar_repo
-        self.groups_repo = container.groups_repo
-        self.curriculum_repo = container.curriculum_repo
+        self._curriculum_repo = curriculum_repo
+        self._groups_repo = groups_repo
+        self._subjects_repo = subjects_repo
+        self._calendar_repo = calendar_repo
 
-        self._init_ui()
-        self.refresh_table()
+        self._current_calendar_id: Optional[int] = None
 
-    def _init_ui(self):
-        layout = QVBoxLayout()
+        root = QVBoxLayout(self)
 
-        top = QHBoxLayout()
-        top.addWidget(QLabel("Фильтр:"))
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItem("Полугодие 1", self.FILTER_H1)
-        self.filter_combo.addItem("Полугодие 2", self.FILTER_H2)
-        self.filter_combo.addItem("Оба", self.FILTER_BOTH)
-        self.filter_combo.setCurrentIndex(2)  # default: Оба
-        top.addWidget(self.filter_combo)
+        toolbar = QHBoxLayout()
+        root.addLayout(toolbar)
 
-        self.btn_refresh = QPushButton("Обновить")
-        self.btn_add = QPushButton("Добавить")
-        self.btn_edit = QPushButton("Редактировать")
-        self.btn_delete = QPushButton("Удалить")
+        toolbar.addWidget(QLabel("Календарь:"))
 
-        top.addWidget(self.btn_refresh)
-        top.addWidget(self.btn_add)
-        top.addWidget(self.btn_edit)
-        top.addWidget(self.btn_delete)
-        top.addStretch()
+        self.calendar_combo = QComboBox()
+        toolbar.addWidget(self.calendar_combo)
 
-        layout.addLayout(top)
+        self.add_calendar_btn = QPushButton("+")
+        self.add_calendar_btn.setFixedWidth(32)
+        self.add_calendar_btn.setToolTip("Добавить семестр")
+        toolbar.addWidget(self.add_calendar_btn)
 
-        self.table = QTableWidget()
-        self.table.setColumnCount(12)
-        self.table.setHorizontalHeaderLabels([
-            "Группа",
-            "Дисциплина",
-            "Лек П1", "Лек П2",
-            "Уч.практ П1", "Уч.практ П2",
-            "Комп.практ П1", "Комп.практ П2",
-            "Лаб П1", "Лаб П2",
-            "group_id (скрыто)",
-            "subject_name (скрыто)",
-        ])
-        self.table.setColumnHidden(self.COL_GID_HIDDEN, True)
-        self.table.setColumnHidden(self.COL_SUBJ_HIDDEN, True)
+        toolbar.addStretch(1)
 
-        layout.addWidget(self.table)
-        self.setLayout(layout)
+        self.add_btn = QPushButton("Добавить")
+        self.edit_btn = QPushButton("Редактировать")
+        self.delete_btn = QPushButton("Удалить")
+        self.refresh_btn = QPushButton("Обновить")
 
-        self.btn_refresh.clicked.connect(self.refresh_table)
-        self.filter_combo.currentIndexChanged.connect(self.refresh_table)
+        toolbar.addWidget(self.add_btn)
+        toolbar.addWidget(self.edit_btn)
+        toolbar.addWidget(self.delete_btn)
+        toolbar.addWidget(self.refresh_btn)
 
-        self.btn_add.clicked.connect(self.add_dialog)
-        self.btn_edit.clicked.connect(self.edit_dialog)
-        self.btn_delete.clicked.connect(self.delete_selected)
-        self.table.cellDoubleClicked.connect(lambda *_: self.edit_dialog())
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Группа",
+                "Дисциплина",
+                "Тип занятия",
+                "Часы/семестр",
+            ]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(self.COL_GROUP, 180)
+        self.table.setColumnWidth(self.COL_SUBJECT, 260)
+        self.table.setColumnWidth(self.COL_PART_TYPE, 170)
+        self.table.setColumnWidth(self.COL_HOURS_SEMESTER, 110)
+        root.addWidget(self.table)
 
-    # ---------- calendar helpers ----------
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        root.addWidget(self.status_label)
 
-    def _ensure_calendars_and_get_ids(self) -> tuple[int, int]:
-        """
-        Гарантирует, что в AcademicCalendar есть записи semester=1 и semester=2.
-        Возвращает "актуальные" id_calendar: последние по id для 1 и 2.
-        """
-        with self.curriculum_repo._session_factory() as conn:
-            conn.row_factory = lambda cur, row: {cur.description[i][0]: row[i] for i in range(len(row))}
+        self.add_btn.clicked.connect(self._add_record)
+        self.edit_btn.clicked.connect(self._edit_record)
+        self.delete_btn.clicked.connect(self._delete_record)
+        self.refresh_btn.clicked.connect(self.refresh)
+        self.calendar_combo.currentIndexChanged.connect(self._calendar_changed)
+        self.add_calendar_btn.clicked.connect(self._create_calendar_dialog)
 
-            cur = conn.execute("SELECT * FROM AcademicCalendar ORDER BY id_calendar DESC")
-            rows = cur.fetchall()
+        self._load_calendars()
+        self.refresh()
 
-            if rows:
-                # возьмём academic_year последней записи
-                ay = rows[0].get("academic_year") or "2025/2026"
-            else:
-                ay = "2025/2026"
+    def _set_status(self, text: str, error: bool = False) -> None:
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(
+            "color: #b42318;" if error else "color: #344054;"
+        )
 
-            sems = set()
-            for r in rows:
-                try:
-                    sems.add(int(r.get("semester", 0)))
-                except Exception:
-                    pass
+    def _select_calendar_by_id(self, calendar_id: int) -> None:
+        idx = self.calendar_combo.findData(int(calendar_id))
+        if idx >= 0:
+            self.calendar_combo.setCurrentIndex(idx)
+            self._current_calendar_id = int(calendar_id)
 
-            if 1 not in sems:
-                conn.execute(
-                    "INSERT INTO AcademicCalendar(academic_year, semester, week_type_mode) VALUES (?, 1, 1)",
-                    (ay,),
-                )
-            if 2 not in sems:
-                conn.execute(
-                    "INSERT INTO AcademicCalendar(academic_year, semester, week_type_mode) VALUES (?, 2, 1)",
-                    (ay,),
-                )
-            conn.commit()
-
-            # теперь возьмём последние id для каждого семестра
-            cur = conn.execute(
-                "SELECT id_calendar FROM AcademicCalendar WHERE semester=1 ORDER BY id_calendar DESC LIMIT 1"
-            )
-            h1 = int(cur.fetchone()["id_calendar"])
-
-            cur = conn.execute(
-                "SELECT id_calendar FROM AcademicCalendar WHERE semester=2 ORDER BY id_calendar DESC LIMIT 1"
-            )
-            h2 = int(cur.fetchone()["id_calendar"])
-
-            return h1, h2
-
-    # ---------- columns visibility ----------
-
-    def _apply_column_visibility(self, mode: str):
-        show_h1 = mode in (self.FILTER_H1, self.FILTER_BOTH)
-        show_h2 = mode in (self.FILTER_H2, self.FILTER_BOTH)
-
-        for col in [self.COL_LEC_H1, self.COL_PR_H1, self.COL_CPR_H1, self.COL_LAB_H1]:
-            self.table.setColumnHidden(col, not show_h1)
-
-        for col in [self.COL_LEC_H2, self.COL_PR_H2, self.COL_CPR_H2, self.COL_LAB_H2]:
-            self.table.setColumnHidden(col, not show_h2)
-
-    # ---------- filter rules ----------
-
-    @staticmethod
-    def _sum_half(row: dict, half: int) -> int:
-        if half == 1:
-            return int(row.get("lec_h1", 0)) + int(row.get("pr_h1", 0)) + int(row.get("cpr_h1", 0)) + int(row.get("lab_h1", 0))
-        return int(row.get("lec_h2", 0)) + int(row.get("pr_h2", 0)) + int(row.get("cpr_h2", 0)) + int(row.get("lab_h2", 0))
-
-    # ---------- main table refresh ----------
-
-    def refresh_table(self):
-        mode = str(self.filter_combo.currentData())
-        self._apply_column_visibility(mode)
-
-        # гарантируем существование календарей и берём id
-        cal_h1_id, cal_h2_id = self._ensure_calendars_and_get_ids()
+    def _load_calendars(self) -> None:
+        self.calendar_combo.blockSignals(True)
+        self.calendar_combo.clear()
 
         try:
-            # В режиме "Оба" — показываем ВСЕ дисциплины (включая полностью нулевые)
-            # => используем НЕ filtered, а "полный" вывод по обоим календарям.
-            if mode == self.FILTER_BOTH:
-                rows = self.curriculum_repo.list_subject_bundle_table(cal_h1_id, cal_h2_id)
-
-            # В режиме П1/П2 — показываем только дисциплины, где в выбранном полугодии НЕ все 0
-            elif mode == self.FILTER_H1:
-                rows = self.curriculum_repo.list_subject_bundle_table(cal_h1_id, cal_h2_id)
-                rows = [r for r in rows if self._sum_half(r, 1) > 0]
-
-            else:  # FILTER_H2
-                rows = self.curriculum_repo.list_subject_bundle_table(cal_h1_id, cal_h2_id)
-                rows = [r for r in rows if self._sum_half(r, 2) > 0]
-
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
+            calendars = self._calendar_repo.list_calendars()
+        except Exception as exc:
+            self._set_status(f"Не удалось загрузить календари: {exc}", error=True)
+            self.calendar_combo.blockSignals(False)
             return
 
-        self.table.setRowCount(len(rows))
+        for cal in calendars:
+            label = (
+                f"{getattr(cal, 'academic_year', '')} | "
+                f"семестр {getattr(cal, 'semester', '')} "
+                f"(id={getattr(cal, 'id_calendar', '')})"
+            )
+            self.calendar_combo.addItem(label, int(cal.id_calendar))
 
-        for i, r in enumerate(rows):
-            self.table.setItem(i, self.COL_GROUP, QTableWidgetItem(r["group_name"]))
-            self.table.setItem(i, self.COL_SUBJECT, QTableWidgetItem(r["subject_name"]))
+        if self.calendar_combo.count() > 0:
+            self._current_calendar_id = int(self.calendar_combo.currentData())
+        else:
+            self._current_calendar_id = None
 
-            self.table.setItem(i, self.COL_LEC_H1, QTableWidgetItem(str(r.get("lec_h1", 0))))
-            self.table.setItem(i, self.COL_LEC_H2, QTableWidgetItem(str(r.get("lec_h2", 0))))
-            self.table.setItem(i, self.COL_PR_H1, QTableWidgetItem(str(r.get("pr_h1", 0))))
-            self.table.setItem(i, self.COL_PR_H2, QTableWidgetItem(str(r.get("pr_h2", 0))))
-            self.table.setItem(i, self.COL_CPR_H1, QTableWidgetItem(str(r.get("cpr_h1", 0))))
-            self.table.setItem(i, self.COL_CPR_H2, QTableWidgetItem(str(r.get("cpr_h2", 0))))
-            self.table.setItem(i, self.COL_LAB_H1, QTableWidgetItem(str(r.get("lab_h1", 0))))
-            self.table.setItem(i, self.COL_LAB_H2, QTableWidgetItem(str(r.get("lab_h2", 0))))
+        self.calendar_combo.blockSignals(False)
 
-            self.table.setItem(i, self.COL_GID_HIDDEN, QTableWidgetItem(str(r["group_id"])))
-            self.table.setItem(i, self.COL_SUBJ_HIDDEN, QTableWidgetItem(str(r["subject_name"])))
+        if self.calendar_combo.count() == 0:
+            self._offer_create_calendar_if_empty()
 
-        self._merge_group_cells()
+    def _offer_create_calendar_if_empty(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Календари отсутствуют",
+            "В базе нет ни одного семестра.\nСоздать новый семестр сейчас?",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._create_calendar_dialog()
 
-    def _merge_group_cells(self):
-        self.table.clearSpans()
+    def _create_calendar_dialog(self) -> None:
+        dlg = CreateCalendarDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
 
-        current = None
-        start = 0
-        count = 0
+        data = dlg.get_data()
 
-        for row in range(self.table.rowCount()):
-            val = self.table.item(row, self.COL_GROUP).text() if self.table.item(row, self.COL_GROUP) else ""
-            if val != current:
-                if current is not None and count > 1:
-                    self.table.setSpan(start, self.COL_GROUP, count, 1)
-                    for r in range(start + 1, start + count):
-                        self.table.setItem(r, self.COL_GROUP, QTableWidgetItem(""))
-                current = val
-                start = row
-                count = 1
-            else:
-                count += 1
+        if not data["academic_year"]:
+            QMessageBox.warning(self, "Ошибка", "Учебный год не может быть пустым.")
+            return
 
-        if current is not None and count > 1:
-            self.table.setSpan(start, self.COL_GROUP, count, 1)
-            for r in range(start + 1, start + count):
-                self.table.setItem(r, self.COL_GROUP, QTableWidgetItem(""))
+        try:
+            calendar_id = self._calendar_repo.create_calendar(
+                academic_year=str(data["academic_year"]),
+                semester=int(data["semester"]),
+                include_saturday=bool(data["include_saturday"]),
+                pairs_per_day=int(data["pairs_per_day"]),
+                weeks_in_semester=int(data["weeks_in_semester"]),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось создать семестр:\n{exc}",
+            )
+            return
 
-    # ---------- selection helpers ----------
+        self._load_calendars()
+        self._select_calendar_by_id(int(calendar_id))
+        self.refresh()
+        self._set_status("Семестр успешно создан.")
 
-    def _selected_key(self):
+    def _calendar_changed(self) -> None:
+        value = self.calendar_combo.currentData()
+        self._current_calendar_id = int(value) if value is not None else None
+        self.refresh()
+
+    def _selected_record(self) -> Optional[dict]:
         row = self.table.currentRow()
         if row < 0:
             return None
-        gid_item = self.table.item(row, self.COL_GID_HIDDEN)
-        subj_item = self.table.item(row, self.COL_SUBJ_HIDDEN)
-        if not gid_item or not subj_item:
+
+        item = self.table.item(row, self.COL_GROUP)
+        if item is None:
             return None
-        return int(gid_item.text()), subj_item.text()
 
-    def _row_to_preset(self) -> PlanDialogResult | None:
-        key = self._selected_key()
-        if not key:
-            return None
-        gid, subject = key
-        row = self.table.currentRow()
+        raw = item.data(Qt.ItemDataRole.UserRole)
+        return raw if isinstance(raw, dict) else None
 
-        def get_int(col: int) -> int:
-            it = self.table.item(row, col)
-            return int(it.text()) if it and it.text().strip() else 0
+    def _ensure_subject(self, subject_name: str, subject_id: Optional[int]) -> int:
+        if subject_id is not None:
+            return int(subject_id)
 
-        return PlanDialogResult(
-            group_id=gid,
-            subject_name=subject,
-            lec_h1=get_int(self.COL_LEC_H1), lec_h2=get_int(self.COL_LEC_H2),
-            pr_h1=get_int(self.COL_PR_H1), pr_h2=get_int(self.COL_PR_H2),
-            cpr_h1=get_int(self.COL_CPR_H1), cpr_h2=get_int(self.COL_CPR_H2),
-            lab_h1=get_int(self.COL_LAB_H1), lab_h2=get_int(self.COL_LAB_H2),
-        )
+        subject_name = subject_name.strip()
+        if not subject_name:
+            raise ValueError("Название дисциплины не может быть пустым.")
 
-    def _validate_bundle(self, d: PlanDialogResult) -> tuple[bool, str]:
-        if not d.subject_name:
-            return False, "Название дисциплины не может быть пустым."
-        total = (
-            d.lec_h1 + d.lec_h2 +
-            d.pr_h1 + d.pr_h2 +
-            d.cpr_h1 + d.cpr_h2 +
-            d.lab_h1 + d.lab_h2
-        )
-        if total <= 0:
-            return False, "Укажи часы хотя бы в одном поле."
-        return True, ""
+        with self._curriculum_repo._session_factory() as conn:
+            row = conn.execute(
+                """
+                SELECT id_subject
+                FROM Subjects
+                WHERE subject_name=?
+                """,
+                (subject_name,),
+            ).fetchone()
 
-    # ---------- actions ----------
+            if row:
+                return int(row[0])
 
-    def add_dialog(self):
-        groups = self.groups_repo.list_all()
-        if not groups:
-            QMessageBox.warning(self, "Нет групп", "Сначала добавь группы.")
+            cur = conn.execute(
+                """
+                INSERT INTO Subjects(subject_name)
+                VALUES (?)
+                """,
+                (subject_name,),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def _fetch_rows(self) -> list[dict]:
+        if self._current_calendar_id is None:
+            return []
+
+        with self._curriculum_repo._session_factory() as conn:
+            conn.row_factory = sqlite_dict_factory
+            rows = conn.execute(
+                """
+                SELECT
+                    ci.id_curriculum,
+                    ci.group_id,
+                    sg.group_name,
+                    ci.subject_id,
+                    s.subject_name,
+                    ci.part_type,
+                    ci.required_room_type,
+                    ci.hours_total_year,
+                    ci.comment,
+                    csp.id_plan,
+                    csp.hours_in_semester,
+                    csp.calendar_id
+                FROM CurriculumSemesterPlan csp
+                JOIN CurriculumItems ci ON ci.id_curriculum = csp.curriculum_id
+                JOIN StudentGroups sg ON sg.id_group = ci.group_id
+                JOIN Subjects s ON s.id_subject = ci.subject_id
+                WHERE csp.calendar_id=?
+                ORDER BY sg.group_name, s.subject_name, ci.part_type, ci.id_curriculum
+                """,
+                (int(self._current_calendar_id),),
+            ).fetchall()
+        return rows
+
+    def _add_record(self) -> None:
+        if self._current_calendar_id is None:
+            QMessageBox.warning(self, "Ошибка", "Сначала выберите календарь.")
             return
 
-        mode = str(self.filter_combo.currentData())
-        enable_h1 = mode in (self.FILTER_H1, self.FILTER_BOTH)
-        enable_h2 = mode in (self.FILTER_H2, self.FILTER_BOTH)
-
-        dlg = PlanEntryDialog(
+        dlg = CurriculumEditDialog(
             self,
-            title="Добавить дисциплину",
-            groups=groups,
-            enable_h1=enable_h1,
-            enable_h2=enable_h2,
+            groups_repo=self._groups_repo,
+            subjects_repo=self._subjects_repo,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        data = dlg.result_data()
-        ok, msg = self._validate_bundle(data)
-        if not ok:
-            QMessageBox.warning(self, "Проверка", msg)
+        data = dlg.get_data()
+
+        if data["group_id"] is None:
+            QMessageBox.warning(self, "Ошибка", "Нужно выбрать группу.")
             return
 
-        cal_h1_id, cal_h2_id = self._ensure_calendars_and_get_ids()
+        if not data["subject_name"]:
+            QMessageBox.warning(self, "Ошибка", "Нужно указать дисциплину.")
+            return
+
+        if int(data["hours_in_semester"]) <= 0:
+            QMessageBox.warning(self, "Ошибка", "Часы в семестре должны быть больше 0.")
+            return
 
         try:
-            self.curriculum_repo.upsert_subject_bundle(
-                group_id=data.group_id,
-                subject_name=data.subject_name,
-                cal_h1_id=int(cal_h1_id) if enable_h1 else 0,
-                cal_h2_id=int(cal_h2_id) if enable_h2 else 0,
-                lec_h1=data.lec_h1 if enable_h1 else 0,
-                lec_h2=data.lec_h2 if enable_h2 else 0,
-                pr_h1=data.pr_h1 if enable_h1 else 0,
-                pr_h2=data.pr_h2 if enable_h2 else 0,
-                cpr_h1=data.cpr_h1 if enable_h1 else 0,
-                cpr_h2=data.cpr_h2 if enable_h2 else 0,
-                lab_h1=data.lab_h1 if enable_h1 else 0,
-                lab_h2=data.lab_h2 if enable_h2 else 0,
+            subject_id = self._ensure_subject(
+                subject_name=str(data["subject_name"]),
+                subject_id=data["subject_id"],
             )
-            self.refresh_table()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
 
-    def edit_dialog(self):
-        key = self._selected_key()
-        if not key:
-            QMessageBox.warning(self, "Нет выбора", "Выбери строку дисциплины.")
+            curriculum_id = self._curriculum_repo.create_curriculum_item(
+                group_id=int(data["group_id"]),
+                subject_id=int(subject_id),
+                part_type=str(data["part_type"]),
+                required_room_type=str(data["required_room_type"]),
+                hours_total_year=int(data["hours_total_year"]),
+                comment=data["comment"],
+            )
+            self._curriculum_repo.create_semester_plan(
+                curriculum_id=int(curriculum_id),
+                calendar_id=int(self._current_calendar_id),
+                hours_in_semester=int(data["hours_in_semester"]),
+                credits=None,
+                spread_mode="auto_even",
+                comment=data["comment"],
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось добавить запись учебного плана:\n{exc}",
+            )
             return
 
-        groups = self.groups_repo.list_all()
-        preset = self._row_to_preset()
+        self.refresh()
+        self._set_status("Запись учебного плана добавлена.")
 
-        mode = str(self.filter_combo.currentData())
-        enable_h1 = mode in (self.FILTER_H1, self.FILTER_BOTH)
-        enable_h2 = mode in (self.FILTER_H2, self.FILTER_BOTH)
+    def _edit_record(self) -> None:
+        record = self._selected_record()
+        if record is None:
+            QMessageBox.information(self, "Не выбрано", "Сначала выберите запись.")
+            return
 
-        dlg = PlanEntryDialog(
+        dlg = CurriculumEditDialog(
             self,
-            title="Редактировать дисциплину",
-            groups=groups,
-            preset=preset,
-            enable_h1=enable_h1,
-            enable_h2=enable_h2,
+            groups_repo=self._groups_repo,
+            subjects_repo=self._subjects_repo,
+            record=record,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        data = dlg.result_data()
-        ok, msg = self._validate_bundle(data)
-        if not ok:
-            QMessageBox.warning(self, "Проверка", msg)
+        data = dlg.get_data()
+
+        if data["group_id"] is None:
+            QMessageBox.warning(self, "Ошибка", "Нужно выбрать группу.")
             return
 
-        cal_h1_id, cal_h2_id = self._ensure_calendars_and_get_ids()
+        if not data["subject_name"]:
+            QMessageBox.warning(self, "Ошибка", "Нужно указать дисциплину.")
+            return
+
+        if int(data["hours_in_semester"]) <= 0:
+            QMessageBox.warning(self, "Ошибка", "Часы в семестре должны быть больше 0.")
+            return
 
         try:
-            self.curriculum_repo.upsert_subject_bundle(
-                group_id=data.group_id,
-                subject_name=data.subject_name,
-                cal_h1_id=int(cal_h1_id) if enable_h1 else 0,
-                cal_h2_id=int(cal_h2_id) if enable_h2 else 0,
-                lec_h1=data.lec_h1 if enable_h1 else 0,
-                lec_h2=data.lec_h2 if enable_h2 else 0,
-                pr_h1=data.pr_h1 if enable_h1 else 0,
-                pr_h2=data.pr_h2 if enable_h2 else 0,
-                cpr_h1=data.cpr_h1 if enable_h1 else 0,
-                cpr_h2=data.cpr_h2 if enable_h2 else 0,
-                lab_h1=data.lab_h1 if enable_h1 else 0,
-                lab_h2=data.lab_h2 if enable_h2 else 0,
+            subject_id = self._ensure_subject(
+                subject_name=str(data["subject_name"]),
+                subject_id=data["subject_id"],
             )
-            self.refresh_table()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
 
-    def delete_selected(self):
-        key = self._selected_key()
-        if not key:
-            QMessageBox.warning(self, "Нет выбора", "Выбери строку дисциплины.")
+            self._curriculum_repo.upsert_curriculum_item(
+                curriculum_id=int(record["id_curriculum"]),
+                group_id=int(data["group_id"]),
+                subject_id=int(subject_id),
+                part_type=str(data["part_type"]),
+                required_room_type=str(data["required_room_type"]),
+                hours_total_year=int(data["hours_total_year"]),
+                comment=data["comment"],
+            )
+
+            with self._curriculum_repo._session_factory() as conn:
+                conn.execute(
+                    """
+                    UPDATE CurriculumSemesterPlan
+                    SET hours_in_semester=?,
+                        comment=?
+                    WHERE id_plan=?
+                    """,
+                    (
+                        int(data["hours_in_semester"]),
+                        data["comment"],
+                        int(record["id_plan"]),
+                    ),
+                )
+                conn.commit()
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось сохранить изменения:\n{exc}",
+            )
             return
 
-        gid, subject = key
+        self.refresh()
+        self._set_status("Запись учебного плана обновлена.")
+
+    def _delete_record(self) -> None:
+        record = self._selected_record()
+        if record is None:
+            QMessageBox.information(self, "Не выбрано", "Сначала выберите запись.")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Подтверждение удаления",
+            f"Удалить запись '{record.get('subject_name', '')}' "
+            f"для группы '{record.get('group_name', '')}'?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
         try:
-            self.curriculum_repo.delete_subject_bundle(group_id=int(gid), subject_name=subject)
-            self.refresh_table()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
+            with self._curriculum_repo._session_factory() as conn:
+                conn.execute(
+                    "DELETE FROM CurriculumSemesterPlan WHERE id_plan=?",
+                    (int(record["id_plan"]),),
+                )
+                conn.execute(
+                    "DELETE FROM CurriculumItems WHERE id_curriculum=?",
+                    (int(record["id_curriculum"]),),
+                )
+                conn.commit()
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось удалить запись:\n{exc}",
+            )
+            return
+
+        self.refresh()
+        self._set_status("Запись учебного плана удалена.")
+
+    def refresh(self) -> None:
+        if self._current_calendar_id is None:
+            self.table.setRowCount(0)
+            self._set_status("Календарь не выбран.", error=True)
+            return
+
+        try:
+            rows = self._fetch_rows()
+        except Exception as exc:
+            self.table.setRowCount(0)
+            self._set_status(
+                f"Не удалось загрузить учебный план: {exc}",
+                error=True,
+            )
+            return
+
+        self.table.setRowCount(0)
+
+        for row_idx, record in enumerate(rows):
+            self.table.insertRow(row_idx)
+
+            group_name = str(record.get("group_name", "") or "")
+            subject_name = str(record.get("subject_name", "") or "")
+            part_type = str(record.get("part_type", "") or "")
+            hours_in_semester = int(record.get("hours_in_semester", 0) or 0)
+
+            group_item = QTableWidgetItem(group_name)
+            group_item.setData(Qt.ItemDataRole.UserRole, record)
+
+            subject_item = QTableWidgetItem(subject_name)
+            part_type_item = QTableWidgetItem(
+                PART_TYPE_LABELS.get(part_type, part_type or "—")
+            )
+            hours_item = QTableWidgetItem(str(hours_in_semester))
+
+            self.table.setItem(row_idx, self.COL_GROUP, group_item)
+            self.table.setItem(row_idx, self.COL_SUBJECT, subject_item)
+            self.table.setItem(row_idx, self.COL_PART_TYPE, part_type_item)
+            self.table.setItem(row_idx, self.COL_HOURS_SEMESTER, hours_item)
+
+        self._set_status(f"Загружено записей учебного плана: {len(rows)}")
+
+
+def sqlite_dict_factory(cursor, row):
+    return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
