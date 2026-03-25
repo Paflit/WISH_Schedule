@@ -180,20 +180,6 @@ class ScheduleCellWidget(QWidget):
 
 
 class ScheduleGrid(QWidget):
-    """
-    Универсальная сетка расписания.
-
-    Возможности:
-    - отображение по группам / преподавателям / аудиториям;
-    - фильтр по конкретной сущности выбранного режима;
-    - фильтр по неделе и типу недели;
-    - хранение и показ нескольких занятий в одной ячейке;
-    - работа с id_schedule как главным идентификатором записи.
-
-    Ожидаемые данные:
-    - список ScheduleEntryDTO
-    """
-
     entryClicked = pyqtSignal(int)
     entryDoubleClicked = pyqtSignal(int)
 
@@ -229,15 +215,9 @@ class ScheduleGrid(QWidget):
 
         toolbar.addWidget(QLabel("Неделя:"))
         self.week_combo = QComboBox()
-        self.week_combo.addItem("Все недели", None)
+        self.week_combo.addItem("1 неделя", 1)
+        self.week_combo.addItem("2 неделя", 2)
         toolbar.addWidget(self.week_combo)
-
-        toolbar.addWidget(QLabel("Тип недели:"))
-        self.week_type_combo = QComboBox()
-        self.week_type_combo.addItem("Все типы недель", None)
-        self.week_type_combo.addItem("Числитель", 1)
-        self.week_type_combo.addItem("Знаменатель", 2)
-        toolbar.addWidget(self.week_type_combo)
 
         toolbar.addStretch(1)
 
@@ -258,20 +238,14 @@ class ScheduleGrid(QWidget):
         self.view_mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self.entity_combo.currentIndexChanged.connect(self._render)
         self.week_combo.currentIndexChanged.connect(self._on_week_changed)
-        self.week_type_combo.currentIndexChanged.connect(self._on_week_type_changed)
 
-    # ---------------------------------------------------------
-    # Public API
-    # ---------------------------------------------------------
     def set_entries(self, entries: Iterable[ScheduleEntryDTO]) -> None:
         self._entries = list(entries or [])
-        self._rebuild_week_filter()
         self._rebuild_entity_filter()
         self._render()
 
     def clear(self) -> None:
         self._entries = []
-        self._rebuild_week_filter()
         self._rebuild_entity_filter()
         self._render()
 
@@ -287,37 +261,15 @@ class ScheduleGrid(QWidget):
             return value
         return None
 
-    def selected_week(self) -> Optional[int]:
-        value = self.week_combo.currentData()
-        return int(value) if value is not None else None
+    def selected_week(self) -> int:
+        return int(self.week_combo.currentData())
 
-    def selected_week_type(self) -> Optional[int]:
-        value = self.week_type_combo.currentData()
-        return int(value) if value is not None else None
-
-    # ---------------------------------------------------------
-    # Internal helpers
-    # ---------------------------------------------------------
     def _entity_key(self, entry: GridCellEntry, mode: str) -> tuple[str, int]:
         if mode == "teacher":
             return (entry.teacher_name or "—", int(entry.teacher_id))
         if mode == "room":
             return (entry.room_number or "—", int(entry.room_id))
         return (entry.group_name or "—", int(entry.group_id))
-
-    def _rebuild_week_filter(self) -> None:
-        weeks = sorted({int(e.week_number) for e in self._entries if int(e.week_number) > 0})
-
-        self.week_combo.blockSignals(True)
-        current = self.week_combo.currentData()
-        self.week_combo.clear()
-        self.week_combo.addItem("Все недели", None)
-        for week in weeks:
-            self.week_combo.addItem(f"Неделя {week}", week)
-
-        idx = self.week_combo.findData(current)
-        self.week_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.week_combo.blockSignals(False)
 
     def _rebuild_entity_filter(self) -> None:
         mode = self.current_view_mode()
@@ -349,10 +301,6 @@ class ScheduleGrid(QWidget):
         self._rebuild_entity_filter()
         self._render()
 
-    def _on_week_type_changed(self) -> None:
-        self._rebuild_entity_filter()
-        self._render()
-
     def _clear_grid(self) -> None:
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
@@ -361,27 +309,14 @@ class ScheduleGrid(QWidget):
                 widget.deleteLater()
 
     def _filtered_entries_without_entity(self) -> list[GridCellEntry]:
-        week_number = self.selected_week()
-        week_type = self.selected_week_type()
+        selected_week = self.selected_week()
 
         result: list[GridCellEntry] = []
         for dto in self._entries:
-            if week_number is not None and int(dto.week_number) != int(week_number):
-                continue
-            if week_type is not None and int(dto.week_type) != int(week_type):
+            if int(dto.week_type) != int(selected_week):
                 continue
             result.append(GridCellEntry.from_dto(dto))
         return result
-
-    def _filtered_entries(self) -> list[GridCellEntry]:
-        mode = self.current_view_mode()
-        selected_entity = self.selected_entity()
-
-        entries = self._filtered_entries_without_entity()
-        if selected_entity is None:
-            return []
-
-        return [e for e in entries if self._entity_key(e, mode) == selected_entity]
 
     def _render(self) -> None:
         self._clear_grid()
@@ -452,6 +387,7 @@ class ScheduleGrid(QWidget):
         self.summary_label.setText(
             f"Режим: {self.view_mode_combo.currentText()} | "
             f"сущность: {selected_entity[0]} | "
+            f"неделя: {self.selected_week()} | "
             f"записей: {len(entries)}"
         )
 

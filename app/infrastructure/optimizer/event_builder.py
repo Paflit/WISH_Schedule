@@ -15,14 +15,45 @@ class LockHint:
     room_id: Optional[int] = None
 
 
-def _parse_room_types(room_type: str | None) -> set[str]:
-    if not room_type:
+def _parse_room_types(room) -> set[str]:
+    """
+    Поддержка новой модели:
+    - если у Room есть room_types -> используем их;
+    - иначе откатываемся на старый room_type.
+
+    Важно:
+    - room_types может быть list[str]
+    - room_type может быть одной строкой или legacy-строкой через запятую
+    """
+    if room is None:
         return set()
-    return {x.strip() for x in str(room_type).split(",") if x.strip()}
+
+    raw_room_types = getattr(room, "room_types", None)
+    if raw_room_types:
+        result = {
+            str(x).strip().lower()
+            for x in list(raw_room_types)
+            if str(x).strip()
+        }
+        if result:
+            return result
+
+    raw_room_type = getattr(room, "room_type", None)
+    if not raw_room_type:
+        return set()
+
+    return {
+        x.strip().lower()
+        for x in str(raw_room_type).split(",")
+        if x.strip()
+    }
 
 
 def _room_matches_required(room, required_room_type: str) -> bool:
-    return required_room_type in _parse_room_types(getattr(room, "room_type", ""))
+    required = str(required_room_type or "").strip().lower()
+    if not required:
+        return False
+    return required in _parse_room_types(room)
 
 
 class EventBuilder:
@@ -268,7 +299,7 @@ class EventBuilder:
         group_id = self._positive_int(getattr(item, "group_id", 0))
         subject_id = self._positive_int(getattr(item, "subject_id", 0))
         part_type = str(getattr(item, "part_type", "") or "").strip()
-        required_room_type = str(getattr(item, "required_room_type", "") or "").strip()
+        required_room_type = str(getattr(item, "required_room_type", "") or "").strip().lower()
 
         if curriculum_id <= 0:
             raise ValidationError("CurriculumItem содержит некорректный id_curriculum.")
@@ -312,11 +343,12 @@ class EventBuilder:
         return result
 
     def _max_capacity_for_required_type(self, required_room_type: str) -> int:
+        required = str(required_room_type or "").strip().lower()
         rooms = self._rooms_repo.list_all()
         capacities = [
             self._positive_int(getattr(r, "capacity", 0))
             for r in rooms
-            if _room_matches_required(r, required_room_type)
+            if _room_matches_required(r, required)
         ]
         capacities = [c for c in capacities if c > 0]
         return max(capacities) if capacities else 0
@@ -354,7 +386,7 @@ class EventBuilder:
             key = (
                 self._positive_int(getattr(event, "subject_id", 0)),
                 str(getattr(event, "part_type", "")).strip(),
-                str(getattr(event, "required_room_type", "")).strip(),
+                str(getattr(event, "required_room_type", "")).strip().lower(),
                 self._normalize_week_number(getattr(event, "fixed_week_number", None)),
                 self._normalize_week_type(getattr(event, "fixed_week_type", None)),
             )
@@ -367,7 +399,7 @@ class EventBuilder:
             if not items:
                 continue
 
-            required_room_type = str(getattr(items[0], "required_room_type", "")).strip()
+            required_room_type = str(getattr(items[0], "required_room_type", "")).strip().lower()
             max_capacity = self._max_capacity_for_required_type(required_room_type)
 
             if max_capacity <= 0:
@@ -451,7 +483,7 @@ class EventBuilder:
                         part_type="lecture",
                         required_room_type=str(
                             getattr(batch[0], "required_room_type", "") or ""
-                        ).strip(),
+                        ).strip().lower(),
                         fixed_week_number=self._normalize_week_number(
                             getattr(batch[0], "fixed_week_number", None)
                         ),
@@ -530,7 +562,7 @@ class EventBuilder:
                     part_type=str(getattr(event, "part_type", "") or "").strip(),
                     required_room_type=str(
                         getattr(event, "required_room_type", "") or ""
-                    ).strip(),
+                    ).strip().lower(),
                     fixed_week_number=self._normalize_week_number(
                         getattr(event, "fixed_week_number", None)
                     ),

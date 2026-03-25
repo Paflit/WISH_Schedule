@@ -322,17 +322,6 @@ class ScheduleCellFrame(QFrame):
 
 
 class EditorPage(QWidget):
-    """
-    Экран ручного редактирования расписания.
-
-    Особенности:
-    - работает с id_schedule;
-    - отображает готовый вариант расписания по сетке;
-    - позволяет выбрать запись и открыть редактирование;
-    - после правки полностью перечитывает вариант через ViewModel;
-    - отображает записи по выбранному режиму и конкретной сущности.
-    """
-
     MODE_GROUP = "По группам"
     MODE_TEACHER = "По преподавателям"
     MODE_ROOM = "По аудиториям"
@@ -365,12 +354,8 @@ class EditorPage(QWidget):
         self.entity_combo = QComboBox()
 
         self.week_filter_combo = QComboBox()
-        self.week_filter_combo.addItem("Все недели", None)
-
-        self.week_type_filter_combo = QComboBox()
-        self.week_type_filter_combo.addItem("Все типы недель", None)
-        self.week_type_filter_combo.addItem("Числитель", 1)
-        self.week_type_filter_combo.addItem("Знаменатель", 2)
+        self.week_filter_combo.addItem("1 неделя", 1)
+        self.week_filter_combo.addItem("2 неделя", 2)
 
         top_bar.addWidget(QLabel("Вариант:"))
         top_bar.addWidget(self.variant_combo, 2)
@@ -380,8 +365,6 @@ class EditorPage(QWidget):
         top_bar.addWidget(self.entity_combo, 2)
         top_bar.addWidget(QLabel("Неделя:"))
         top_bar.addWidget(self.week_filter_combo, 1)
-        top_bar.addWidget(QLabel("Тип недели:"))
-        top_bar.addWidget(self.week_type_filter_combo, 1)
         top_bar.addWidget(self.refresh_btn)
         top_bar.addWidget(self.edit_btn)
 
@@ -424,7 +407,6 @@ class EditorPage(QWidget):
         self.view_mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self.entity_combo.currentIndexChanged.connect(self._render_current_variant)
         self.week_filter_combo.currentIndexChanged.connect(self._render_current_variant)
-        self.week_type_filter_combo.currentIndexChanged.connect(self._render_current_variant)
         self.entries_list.itemClicked.connect(self._list_item_clicked)
         self.entries_list.itemDoubleClicked.connect(self._list_item_double_clicked)
 
@@ -436,9 +418,6 @@ class EditorPage(QWidget):
 
         self._populate_variants()
 
-    # ---------------------------------------------------------
-    # Init / load
-    # ---------------------------------------------------------
     def _populate_variants(self) -> None:
         self.variant_combo.blockSignals(True)
         self.variant_combo.clear()
@@ -471,14 +450,10 @@ class EditorPage(QWidget):
     def _reload_current_variant(self) -> None:
         self.vm.refresh()
 
-    # ---------------------------------------------------------
-    # VM callbacks
-    # ---------------------------------------------------------
     def _on_variant_loaded(self, variant) -> None:
         self._current_entry_id = None
         self.edit_btn.setEnabled(False)
         self.selected_title.setText("Запись не выбрана.")
-        self._rebuild_week_filters(variant)
         self._rebuild_entity_filter(variant)
         self._render_variant(variant)
 
@@ -512,26 +487,9 @@ class EditorPage(QWidget):
         else:
             self.status_label.setText("")
 
-    # ---------------------------------------------------------
-    # Filters / rendering
-    # ---------------------------------------------------------
-    def _rebuild_week_filters(self, variant) -> None:
-        weeks = sorted({int(e.week_number) for e in variant.entries if int(e.week_number) > 0})
-
-        self.week_filter_combo.blockSignals(True)
-        self.week_filter_combo.clear()
-        self.week_filter_combo.addItem("Все недели", None)
-        for w in weeks:
-            self.week_filter_combo.addItem(f"Неделя {w}", w)
-        self.week_filter_combo.blockSignals(False)
-
-    def _selected_week_number(self) -> Optional[int]:
+    def _selected_week_number(self) -> int:
         value = self.week_filter_combo.currentData()
-        return int(value) if value is not None else None
-
-    def _selected_week_type(self) -> Optional[int]:
-        value = self.week_type_filter_combo.currentData()
-        return int(value) if value is not None else None
+        return int(value)
 
     def _selected_mode(self) -> str:
         return str(self.view_mode_combo.currentText())
@@ -561,13 +519,10 @@ class EditorPage(QWidget):
 
     def _rebuild_entity_filter(self, variant) -> None:
         mode = self._selected_mode()
+        selected_week = self._selected_week_number()
 
         entries = list(variant.entries or [])
-        filtered = [
-            e for e in entries
-            if (self._selected_week_number() is None or int(e.week_number) == int(self._selected_week_number()))
-            and (self._selected_week_type() is None or int(e.week_type) == int(self._selected_week_type()))
-        ]
+        filtered = [e for e in entries if int(e.week_type) == int(selected_week)]
 
         entities = sorted(
             {self._entity_key(e, mode) for e in filtered},
@@ -605,11 +560,11 @@ class EditorPage(QWidget):
 
         mode = self._selected_mode()
         selected_entity = self._selected_entity_key()
+        selected_week = self._selected_week_number()
 
         entries = [
             e for e in variant.entries
-            if (self._selected_week_number() is None or int(e.week_number) == int(self._selected_week_number()))
-            and (self._selected_week_type() is None or int(e.week_type) == int(self._selected_week_type()))
+            if int(e.week_type) == int(selected_week)
         ]
 
         if not entries:
@@ -675,9 +630,6 @@ class EditorPage(QWidget):
 
         self._fill_entries_list(entries)
 
-    # ---------------------------------------------------------
-    # Right panel list
-    # ---------------------------------------------------------
     def _fill_entries_list(self, entries) -> None:
         self.entries_list.clear()
         for e in entries:
@@ -701,9 +653,6 @@ class EditorPage(QWidget):
         if entry_id is not None:
             self._open_editor_for_entry(int(entry_id))
 
-    # ---------------------------------------------------------
-    # Edit dialog
-    # ---------------------------------------------------------
     def _open_current_entry_editor(self) -> None:
         if self._current_entry_id is None:
             QMessageBox.information(self, "Запись не выбрана", "Сначала выберите запись.")

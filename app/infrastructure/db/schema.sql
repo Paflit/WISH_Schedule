@@ -30,10 +30,10 @@ CREATE TABLE IF NOT EXISTS Classes (
     id_class INTEGER PRIMARY KEY AUTOINCREMENT,
     room_number TEXT NOT NULL UNIQUE,
     room_type TEXT NOT NULL,
-    capacity INTEGER NOT NULL DEFAULT 0 CHECK (capacity >= 0),
+    room_types_json TEXT,
+    capacity INTEGER NOT NULL DEFAULT 0,
     building TEXT
 );
-
 -- =========================================================
 -- Преподаватель <-> дисциплина
 -- =========================================================

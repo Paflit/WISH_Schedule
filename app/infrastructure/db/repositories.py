@@ -662,10 +662,53 @@ class SqliteGroupsRepository:
 # Rooms Repository
 # ============================================================
 
-
 class SqliteRoomsRepository:
+    ROOM_TYPE_PRIORITY = ["lab", "computer", "lecture", "classroom"]
+
     def __init__(self, session_factory):
         self._session_factory = session_factory
+
+    def _normalize_room_types(
+        self,
+        room_type: str | None = None,
+        room_types: list[str] | None = None,
+    ) -> list[str]:
+        raw = list(room_types or [])
+        if not raw and room_type:
+            raw = [room_type]
+
+        normalized: list[str] = []
+        seen = set()
+
+        for value in raw:
+            v = str(value or "").strip().lower()
+            if not v:
+                continue
+            if v not in {"lab", "computer", "lecture", "classroom"}:
+                continue
+            if v in seen:
+                continue
+            seen.add(v)
+            normalized.append(v)
+
+        # сортируем по приоритету
+        normalized.sort(
+            key=lambda x: self.ROOM_TYPE_PRIORITY.index(x)
+            if x in self.ROOM_TYPE_PRIORITY
+            else 999
+        )
+
+        return normalized
+
+    def _primary_room_type(
+        self,
+        room_type: str | None = None,
+        room_types: list[str] | None = None,
+    ) -> str:
+        types = self._normalize_room_types(room_type=room_type, room_types=room_types)
+        if not types:
+            return "classroom"
+        return types[0]
 
     def create(
         self,
@@ -673,14 +716,36 @@ class SqliteRoomsRepository:
         room_type: str,
         capacity: int,
         building: str | None = None,
+        room_types: list[str] | None = None,
     ) -> int:
+        normalized_types = self._normalize_room_types(
+            room_type=room_type,
+            room_types=room_types,
+        )
+        primary_type = self._primary_room_type(
+            room_type=room_type,
+            room_types=room_types,
+        )
+
         with self._session_factory() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO Classes(room_number, room_type, capacity, building)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO Classes(
+                    room_number,
+                    room_type,
+                    room_types_json,
+                    capacity,
+                    building
+                )
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (room_number, room_type, int(capacity), building),
+                (
+                    room_number,
+                    primary_type,
+                    json.dumps(normalized_types, ensure_ascii=False),
+                    int(capacity),
+                    building,
+                ),
             )
             conn.commit()
             return int(cur.lastrowid)
@@ -692,15 +757,36 @@ class SqliteRoomsRepository:
         room_type: str,
         capacity: int,
         building: str | None = None,
+        room_types: list[str] | None = None,
     ) -> None:
+        normalized_types = self._normalize_room_types(
+            room_type=room_type,
+            room_types=room_types,
+        )
+        primary_type = self._primary_room_type(
+            room_type=room_type,
+            room_types=room_types,
+        )
+
         with self._session_factory() as conn:
             conn.execute(
                 """
                 UPDATE Classes
-                SET room_number=?, room_type=?, capacity=?, building=?
+                SET room_number=?,
+                    room_type=?,
+                    room_types_json=?,
+                    capacity=?,
+                    building=?
                 WHERE id_class=?
                 """,
-                (room_number, room_type, int(capacity), building, int(id_room)),
+                (
+                    room_number,
+                    primary_type,
+                    json.dumps(normalized_types, ensure_ascii=False),
+                    int(capacity),
+                    building,
+                    int(id_room),
+                ),
             )
             conn.commit()
 
@@ -708,6 +794,30 @@ class SqliteRoomsRepository:
         with self._session_factory() as conn:
             conn.execute("DELETE FROM Classes WHERE id_class=?", (int(id_room),))
             conn.commit()
+
+    def _parse_room_types(self, row: dict) -> list[str]:
+        raw_json = row.get("room_types_json")
+        if raw_json:
+            try:
+                data = json.loads(raw_json)
+                if isinstance(data, list):
+                    result = []
+                    for value in data:
+                        v = str(value or "").strip().lower()
+                        if v and v not in result:
+                            result.append(v)
+                    if result:
+                        result.sort(
+                            key=lambda x: self.ROOM_TYPE_PRIORITY.index(x)
+                            if x in self.ROOM_TYPE_PRIORITY
+                            else 999
+                        )
+                        return result
+            except Exception:
+                pass
+
+        room_type = str(row.get("room_type") or "").strip().lower()
+        return [room_type] if room_type else []
 
     def list_all(self) -> List[Room]:
         with self._session_factory() as conn:
@@ -720,16 +830,22 @@ class SqliteRoomsRepository:
                 """
             ).fetchall()
 
-        return [
-            Room(
+        result: List[Room] = []
+        for r in rows:
+            room = Room(
                 id_room=int(r["id_class"]),
                 room_number=str(r["room_number"]),
                 room_type=str(r["room_type"]),
                 capacity=_positive_int(r["capacity"], 0),
                 building=r.get("building"),
             )
-            for r in rows
-        ]
+            try:
+                setattr(room, "room_types", self._parse_room_types(r))
+            except Exception:
+                pass
+            result.append(room)
+
+        return result
 
     def get_by_id(self, id_room: int) -> Optional[Room]:
         with self._session_factory() as conn:
@@ -740,14 +856,19 @@ class SqliteRoomsRepository:
             ).fetchone()
         if not row:
             return None
-        return Room(
+
+        room = Room(
             id_room=int(row["id_class"]),
             room_number=str(row["room_number"]),
             room_type=str(row["room_type"]),
             capacity=_positive_int(row["capacity"], 0),
             building=row.get("building"),
         )
-
+        try:
+            setattr(room, "room_types", self._parse_room_types(row))
+        except Exception:
+            pass
+        return room
 
 # ============================================================
 # Calendar Repository

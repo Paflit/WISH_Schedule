@@ -25,6 +25,14 @@ from app.domain.rules import SchedulingRules
 MAX_ROOMS_PER_EVENT = 8
 MAX_SLOTS_PER_EVENT = 32
 
+# Чем меньше число — тем более специализированная аудитория.
+ROOM_SPECIALIZATION_RANK = {
+    "lab": 1,
+    "computer": 2,
+    "lecture": 3,
+    "classroom": 4,
+}
+
 
 def _positive_int(value, default: int = 0) -> int:
     try:
@@ -43,35 +51,89 @@ def _optional_int(value) -> Optional[int]:
     return v if v > 0 else None
 
 
-def _parse_room_types(room_type: str | None) -> set[str]:
-    if not room_type:
+def _parse_room_types(room: Room | None) -> set[str]:
+    """
+    Поддержка новой модели:
+    - сначала читаем room.room_types;
+    - если его нет, откатываемся на legacy room.room_type.
+
+    room.room_types может быть list[str]
+    room.room_type может быть одной строкой или legacy-строкой через запятую
+    """
+    if room is None:
         return set()
-    return {x.strip() for x in str(room_type).split(",") if x.strip()}
+
+    raw_room_types = getattr(room, "room_types", None)
+    if raw_room_types:
+        result = {
+            str(x).strip().lower()
+            for x in list(raw_room_types)
+            if str(x).strip()
+        }
+        if result:
+            return result
+
+    raw_room_type = getattr(room, "room_type", None)
+    if not raw_room_type:
+        return set()
+
+    return {
+        x.strip().lower()
+        for x in str(raw_room_type).split(",")
+        if x.strip()
+    }
 
 
 def _room_matches_required(room: Room, required_room_type: str) -> bool:
-    return required_room_type in _parse_room_types(getattr(room, "room_type", ""))
+    required = str(required_room_type or "").strip().lower()
+    if not required:
+        return False
+    return required in _parse_room_types(room)
 
 
 def _room_priority_penalty(room: Room, required_room_type: str) -> int:
     """
     Меньше — лучше.
-    Штрафуем за перерасход ресурса аудитории.
+
+    Логика:
+    - если аудитория не поддерживает требуемый тип -> большой штраф;
+    - если поддерживает, то штраф зависит от того,
+      насколько аудитория "слишком специализирована" для этой задачи.
+
+    Приоритет специализации:
+    1. lab
+    2. computer
+    3. lecture
+    4. classroom
+
+    Пример:
+    - для classroom использовать lab — плохо;
+    - для lab использовать lab — нормально;
+    - для lecture использовать lecture — нормально;
+    - для lecture использовать lab/computer — хуже.
     """
-    room_types = _parse_room_types(getattr(room, "room_type", ""))
-    if required_room_type not in room_types:
+    required = str(required_room_type or "").strip().lower()
+    room_types = _parse_room_types(room)
+
+    if required not in room_types:
         return 10_000
 
-    resource_rank = {
-        "computer": 4,
-        "lecture": 3,
-        "lab": 2,
-        "classroom": 1,
-    }
+    required_rank = ROOM_SPECIALIZATION_RANK.get(required, 999)
+    if required_rank == 999:
+        return 10_000
 
-    highest_room_rank = max((resource_rank.get(t, 0) for t in room_types), default=0)
-    required_rank = resource_rank.get(required_room_type, 0)
-    return max(0, highest_room_rank - required_rank)
+    # Самый "сильный" тип аудитории = минимальный rank.
+    strongest_room_rank = min(
+        (ROOM_SPECIALIZATION_RANK.get(t, 999) for t in room_types),
+        default=999,
+    )
+
+    if strongest_room_rank == 999:
+        return 10_000
+
+    # Если аудитория более специализирована, чем нужно,
+    # даём штраф за перерасход ресурса.
+    return max(0, required_rank - strongest_room_rank)
 
 
 def _day_key(slot: TimeSlot) -> Tuple[int, int]:
@@ -564,7 +626,6 @@ class CPSatScheduleSolver:
                 f"group_{gid}_{daykey[0]}_{daykey[1]}_overload",
             )
 
-            # Если день используется, желательно не меньше min и не больше max.
             model.Add(low >= min_pairs_students_per_day * has_day - day_load)
             model.Add(low >= 0)
             model.Add(high >= day_load - max_pairs_students_per_day)
@@ -617,7 +678,6 @@ class CPSatScheduleSolver:
                     len(used_day_bools),
                     f"teacher_{tid}_no_method_day",
                 )
-                # штраф 0, если есть хотя бы один свободный день
                 model.Add(no_method_day >= days_used - (len(used_day_bools) - 1))
                 model.Add(no_method_day >= 0)
                 method_day_terms.append(no_method_day)
@@ -653,8 +713,6 @@ class CPSatScheduleSolver:
         ):
             raise SolverError(self._status_to_message(status))
 
-        # На некоторых версиях CP-SAT callback может вернуть 0 решений,
-        # если нашли решение только в основном проходе без callback-коллекции.
         if not collector.solutions:
             entries: List[SolutionEntry] = []
             for eid, options in event_options.items():
@@ -792,9 +850,9 @@ class CPSatScheduleSolver:
                 )
                 continue
 
-            required_room_type = str(getattr(e, "required_room_type", "") or "").strip()
+            required_room_type = str(getattr(e, "required_room_type", "") or "").strip().lower()
             if not required_room_type:
-                required_room_type = str(getattr(cur, "required_room_type", "") or "").strip()
+                required_room_type = str(getattr(cur, "required_room_type", "") or "").strip().lower()
 
             candidate_rooms = [
                 r

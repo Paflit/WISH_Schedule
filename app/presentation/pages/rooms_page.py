@@ -5,10 +5,12 @@ from typing import Optional
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -28,15 +30,21 @@ class RoomEditDialog(QDialog):
     Актуальная модель:
     - ID не вводится вручную;
     - обязательно есть номер/название аудитории;
-    - обязательно есть тип аудитории;
+    - аудитория может поддерживать несколько типов одновременно;
     - обязательно есть вместимость.
+
+    Приоритет главного типа:
+    1. lab
+    2. computer
+    3. lecture
+    4. classroom
     """
 
     ROOM_TYPES = [
+        ("Лаборатория", "lab"),
+        ("Компьютерный класс", "computer"),
         ("Лекционная", "lecture"),
         ("Обычная аудитория", "classroom"),
-        ("Компьютерный класс", "computer"),
-        ("Лаборатория", "lab"),
     ]
 
     def __init__(self, parent, room: Optional[object] = None):
@@ -46,7 +54,7 @@ class RoomEditDialog(QDialog):
         self.setWindowTitle(
             "Редактирование аудитории" if room is not None else "Добавление аудитории"
         )
-        self.resize(420, 200)
+        self.resize(470, 280)
 
         root = QVBoxLayout(self)
 
@@ -59,20 +67,35 @@ class RoomEditDialog(QDialog):
         self.room_number_combo.setPlaceholderText("Введите номер или название аудитории")
         form.addRow("Аудитория:", self.room_number_combo)
 
-        self.room_type_combo = QComboBox()
-        for label, value in self.ROOM_TYPES:
-            self.room_type_combo.addItem(label, value)
-        form.addRow("Тип аудитории:", self.room_type_combo)
-
         self.capacity_spin = QSpinBox()
         self.capacity_spin.setRange(1, 5000)
         self.capacity_spin.setValue(30)
         form.addRow("Вместимость:", self.capacity_spin)
 
-        hint = QLabel("ID аудитории создаётся автоматически базой данных.")
+        types_box = QWidget()
+        types_layout = QGridLayout(types_box)
+        types_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.type_checks: dict[str, QCheckBox] = {}
+        for idx, (label, value) in enumerate(self.ROOM_TYPES):
+            checkbox = QCheckBox(label)
+            self.type_checks[value] = checkbox
+            types_layout.addWidget(checkbox, idx // 2, idx % 2)
+
+        form.addRow("Типы аудитории:", types_box)
+
+        hint = QLabel(
+            "Можно выбрать несколько типов одновременно.\n"
+            "Главный тип определяется автоматически по приоритету:\n"
+            "Лабораторные → Компьютерные → Лекции → Учебные пары."
+        )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #667085;")
         root.addWidget(hint)
+
+        self.primary_type_label = QLabel("Главный тип: —")
+        self.primary_type_label.setStyleSheet("font-weight: 600; color: #344054;")
+        root.addWidget(self.primary_type_label)
 
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -82,30 +105,63 @@ class RoomEditDialog(QDialog):
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
 
+        for checkbox in self.type_checks.values():
+            checkbox.toggled.connect(self._update_primary_type_preview)
+
         self._fill()
+        self._update_primary_type_preview()
 
     def _fill(self) -> None:
         if self._room is None:
             return
 
         room_number = str(getattr(self._room, "room_number", "") or "")
-        room_type = str(getattr(self._room, "room_type", "") or "")
         capacity = int(getattr(self._room, "capacity", 30) or 30)
 
         self.room_number_combo.addItem(room_number)
         self.room_number_combo.setCurrentText(room_number)
-
-        idx = self.room_type_combo.findData(room_type)
-        if idx >= 0:
-            self.room_type_combo.setCurrentIndex(idx)
-
         self.capacity_spin.setValue(capacity)
 
-    def get_data(self) -> tuple[str, str, int]:
+        room_types = getattr(self._room, "room_types", None)
+        if not room_types:
+            single_type = str(getattr(self._room, "room_type", "") or "")
+            room_types = [single_type] if single_type else []
+
+        normalized = {str(x).strip().lower() for x in room_types if str(x).strip()}
+        for value, checkbox in self.type_checks.items():
+            checkbox.setChecked(value in normalized)
+
+    def _get_selected_room_types(self) -> list[str]:
+        selected = [value for value, cb in self.type_checks.items() if cb.isChecked()]
+        priority = ["lab", "computer", "lecture", "classroom"]
+        selected.sort(key=lambda x: priority.index(x) if x in priority else 999)
+        return selected
+
+    def _get_primary_room_type(self) -> str:
+        selected = self._get_selected_room_types()
+        return selected[0] if selected else ""
+
+    def _room_type_label(self, value: str) -> str:
+        mapping = {
+            "lab": "Лаборатория",
+            "computer": "Компьютерный класс",
+            "lecture": "Лекционная",
+            "classroom": "Обычная аудитория",
+        }
+        return mapping.get(value, value or "—")
+
+    def _update_primary_type_preview(self) -> None:
+        primary = self._get_primary_room_type()
+        self.primary_type_label.setText(
+            f"Главный тип: {self._room_type_label(primary) if primary else '—'}"
+        )
+
+    def get_data(self) -> tuple[str, str, list[str], int]:
         room_number = self.room_number_combo.currentText().strip()
-        room_type = str(self.room_type_combo.currentData() or "")
+        room_types = self._get_selected_room_types()
+        primary_room_type = self._get_primary_room_type()
         capacity = int(self.capacity_spin.value())
-        return room_number, room_type, capacity
+        return room_number, primary_room_type, room_types, capacity
 
 
 class RoomsPage(QWidget):
@@ -115,13 +171,14 @@ class RoomsPage(QWidget):
     Показывает:
     - ID
     - номер/название аудитории
-    - тип аудитории
+    - список типов аудитории
     - вместимость
 
     Важно:
     - ID не вводится вручную;
-    - данные должны быть пригодны для solver;
-    - тип аудитории и вместимость обязательны.
+    - одна аудитория может подходить для нескольких типов занятий;
+    - главный тип определяется по приоритету:
+      lab > computer > lecture > classroom
     """
 
     def __init__(self, rooms_repo):
@@ -147,7 +204,7 @@ class RoomsPage(QWidget):
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(
-            ["ID", "Аудитория", "Тип", "Вместимость"]
+            ["ID", "Аудитория", "Типы аудитории", "Вместимость"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -157,7 +214,7 @@ class RoomsPage(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setColumnWidth(0, 70)
         self.table.setColumnWidth(1, 220)
-        self.table.setColumnWidth(2, 180)
+        self.table.setColumnWidth(2, 240)
         self.table.setColumnWidth(3, 110)
         root.addWidget(self.table)
 
@@ -200,12 +257,21 @@ class RoomsPage(QWidget):
         }
         return mapping.get(value, value or "—")
 
+    def _room_types_label(self, room) -> str:
+        room_types = getattr(room, "room_types", None)
+        if not room_types:
+            single_type = str(getattr(room, "room_type", "") or "")
+            room_types = [single_type] if single_type else []
+
+        labels = [self._room_type_label(str(x)) for x in room_types if str(x).strip()]
+        return ", ".join(labels) if labels else "—"
+
     def _add_room(self) -> None:
         dlg = RoomEditDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        room_number, room_type, capacity = dlg.get_data()
+        room_number, room_type, room_types, capacity = dlg.get_data()
 
         if not room_number:
             QMessageBox.warning(
@@ -215,11 +281,11 @@ class RoomsPage(QWidget):
             )
             return
 
-        if not room_type:
+        if not room_types:
             QMessageBox.warning(
                 self,
                 "Ошибка",
-                "Нужно выбрать тип аудитории.",
+                "Нужно выбрать хотя бы один тип аудитории.",
             )
             return
 
@@ -235,6 +301,7 @@ class RoomsPage(QWidget):
             self._rooms_repo.create(
                 room_number=room_number,
                 room_type=room_type,
+                room_types=room_types,
                 capacity=int(capacity),
                 building=None,
             )
@@ -265,7 +332,7 @@ class RoomsPage(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        room_number, room_type, capacity = dlg.get_data()
+        room_number, room_type, room_types, capacity = dlg.get_data()
 
         if not room_number:
             QMessageBox.warning(
@@ -275,11 +342,11 @@ class RoomsPage(QWidget):
             )
             return
 
-        if not room_type:
+        if not room_types:
             QMessageBox.warning(
                 self,
                 "Ошибка",
-                "Нужно выбрать тип аудитории.",
+                "Нужно выбрать хотя бы один тип аудитории.",
             )
             return
 
@@ -296,6 +363,7 @@ class RoomsPage(QWidget):
                 id_room=int(room_id),
                 room_number=room_number,
                 room_type=room_type,
+                room_types=room_types,
                 capacity=int(capacity),
                 building=None,
             )
@@ -357,19 +425,18 @@ class RoomsPage(QWidget):
 
             id_room = int(getattr(room, "id_room", 0))
             room_number = str(getattr(room, "room_number", "") or "")
-            room_type = str(getattr(room, "room_type", "") or "")
             capacity = int(getattr(room, "capacity", 0) or 0)
 
             id_item = QTableWidgetItem(str(id_room))
             id_item.setData(Qt.ItemDataRole.UserRole, id_room)
 
             room_item = QTableWidgetItem(room_number)
-            type_item = QTableWidgetItem(self._room_type_label(room_type))
+            types_item = QTableWidgetItem(self._room_types_label(room))
             capacity_item = QTableWidgetItem(str(capacity))
 
             self.table.setItem(row_idx, 0, id_item)
             self.table.setItem(row_idx, 1, room_item)
-            self.table.setItem(row_idx, 2, type_item)
+            self.table.setItem(row_idx, 2, types_item)
             self.table.setItem(row_idx, 3, capacity_item)
 
         self._set_status(f"Загружено аудиторий: {len(rows)}")
