@@ -1,20 +1,3 @@
-"""
-DictionariesViewModel
-
-ViewModel для справочников:
-- Teachers
-- Groups
-- Subjects
-- Rooms
-
-Задачи:
-- загрузка данных из репозиториев
-- отдача "плоских" списков для таблиц
-- централизованная обработка ошибок
-
-Page не должна напрямую обращаться к repo.
-"""
-
 from __future__ import annotations
 
 from typing import List, Dict
@@ -23,6 +6,14 @@ from app.presentation.viewmodels.base_vm import BaseViewModel
 
 
 class DictionariesViewModel(BaseViewModel):
+    ROOM_TYPE_LABELS = {
+        "lecture": "Лекционная",
+        "classroom": "Обычная аудитория",
+        "computer": "Компьютерный класс",
+        "lab": "Лаборатория",
+    }
+
+    ROOM_TYPE_PRIORITY = ["lab", "computer", "lecture", "classroom"]
 
     def __init__(self, container):
         super().__init__(container)
@@ -92,18 +83,63 @@ class DictionariesViewModel(BaseViewModel):
     # Rooms
     # ---------------------------------------------------------
 
+    def _normalize_room_types(self, room) -> list[str]:
+        room_types = getattr(room, "room_types", None)
+
+        if room_types:
+            raw = [str(x).strip().lower() for x in room_types if str(x).strip()]
+        else:
+            single_type = str(getattr(room, "room_type", "") or "").strip().lower()
+            raw = [single_type] if single_type else []
+
+        seen = set()
+        normalized: list[str] = []
+
+        for value in raw:
+            if value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+
+        normalized.sort(
+            key=lambda x: self.ROOM_TYPE_PRIORITY.index(x)
+            if x in self.ROOM_TYPE_PRIORITY
+            else 999
+        )
+        return normalized
+
+    def _room_type_label(self, value: str) -> str:
+        return self.ROOM_TYPE_LABELS.get(value, value or "—")
+
+    def _room_types_display(self, room_types: list[str]) -> str:
+        if not room_types:
+            return "—"
+        return ", ".join(self._room_type_label(x) for x in room_types)
+
     def load_rooms(self) -> List[Dict]:
         def _load():
             rooms = self.rooms_repo.list_all()
-            return [
-                {
-                    "id": r.id_room,
-                    "number": r.room_number,
-                    "type": r.room_type,
-                    "capacity": r.capacity,
-                    "building": r.building,
-                }
-                for r in rooms
-            ]
+            result = []
+
+            for r in rooms:
+                room_types = self._normalize_room_types(r)
+                primary_type = (
+                    str(getattr(r, "room_type", "") or "").strip().lower()
+                    or (room_types[0] if room_types else "")
+                )
+
+                result.append(
+                    {
+                        "id": r.id_room,
+                        "number": r.room_number,
+                        "type": primary_type,
+                        "room_types": room_types,
+                        "room_types_display": self._room_types_display(room_types),
+                        "capacity": r.capacity,
+                        "building": r.building,
+                    }
+                )
+
+            return result
 
         return self.execute(_load) or []

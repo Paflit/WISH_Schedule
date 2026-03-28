@@ -11,9 +11,7 @@ def _load_schema_sql() -> str:
     """
     schema_path = Path(__file__).with_name("schema.sql")
     if not schema_path.exists():
-        raise FileNotFoundError(
-            f"Не найден schema.sql по пути: {schema_path}"
-        )
+        raise FileNotFoundError(f"Не найден schema.sql по пути: {schema_path}")
     return schema_path.read_text(encoding="utf-8")
 
 
@@ -47,7 +45,7 @@ def _run_post_schema_migrations(conn: sqlite3.Connection) -> None:
         if "room_types_json" not in columns:
             conn.execute("ALTER TABLE Classes ADD COLUMN room_types_json TEXT")
 
-        # Заполнить новое поле из старого room_type, если оно пустое
+        # заполнить новое поле из старого room_type, если оно пустое
         conn.execute(
             """
             UPDATE Classes
@@ -77,7 +75,7 @@ def _run_post_schema_migrations(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE ScheduleLocks ADD COLUMN event_id INTEGER")
 
     # ---------------------------------------------------------
-    # Индексы по event_id
+    # Индексы, которые зависят от новых колонок
     # ---------------------------------------------------------
     if _table_exists(conn, "ScheduleEntries"):
         columns = _get_columns(conn, "ScheduleEntries")

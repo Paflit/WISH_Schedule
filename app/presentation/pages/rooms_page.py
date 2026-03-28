@@ -32,12 +32,6 @@ class RoomEditDialog(QDialog):
     - обязательно есть номер/название аудитории;
     - аудитория может поддерживать несколько типов одновременно;
     - обязательно есть вместимость.
-
-    Приоритет главного типа:
-    1. lab
-    2. computer
-    3. lecture
-    4. classroom
     """
 
     ROOM_TYPES = [
@@ -46,6 +40,8 @@ class RoomEditDialog(QDialog):
         ("Лекционная", "lecture"),
         ("Обычная аудитория", "classroom"),
     ]
+
+    PRIORITY = ["lab", "computer", "lecture", "classroom"]
 
     def __init__(self, parent, room: Optional[object] = None):
         super().__init__(parent)
@@ -86,7 +82,7 @@ class RoomEditDialog(QDialog):
 
         hint = QLabel(
             "Можно выбрать несколько типов одновременно.\n"
-            "Главный тип определяется автоматически по приоритету:\n"
+            "Приоритет специализации:\n"
             "Лабораторные → Компьютерные → Лекции → Учебные пары."
         )
         hint.setWordWrap(True)
@@ -133,8 +129,7 @@ class RoomEditDialog(QDialog):
 
     def _get_selected_room_types(self) -> list[str]:
         selected = [value for value, cb in self.type_checks.items() if cb.isChecked()]
-        priority = ["lab", "computer", "lecture", "classroom"]
-        selected.sort(key=lambda x: priority.index(x) if x in priority else 999)
+        selected.sort(key=lambda x: self.PRIORITY.index(x) if x in self.PRIORITY else 999)
         return selected
 
     def _get_primary_room_type(self) -> str:
@@ -173,12 +168,6 @@ class RoomsPage(QWidget):
     - номер/название аудитории
     - список типов аудитории
     - вместимость
-
-    Важно:
-    - ID не вводится вручную;
-    - одна аудитория может подходить для нескольких типов занятий;
-    - главный тип определяется по приоритету:
-      lab > computer > lecture > classroom
     """
 
     def __init__(self, rooms_repo):
@@ -271,7 +260,7 @@ class RoomsPage(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        room_number, room_type, room_types, capacity = dlg.get_data()
+        room_number, primary_room_type, room_types, capacity = dlg.get_data()
 
         if not room_number:
             QMessageBox.warning(
@@ -289,6 +278,14 @@ class RoomsPage(QWidget):
             )
             return
 
+        if not primary_room_type:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Не удалось определить главный тип аудитории.",
+            )
+            return
+
         if int(capacity) <= 0:
             QMessageBox.warning(
                 self,
@@ -300,7 +297,7 @@ class RoomsPage(QWidget):
         try:
             self._rooms_repo.create(
                 room_number=room_number,
-                room_type=room_type,
+                room_type=primary_room_type,
                 room_types=room_types,
                 capacity=int(capacity),
                 building=None,
@@ -332,7 +329,7 @@ class RoomsPage(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        room_number, room_type, room_types, capacity = dlg.get_data()
+        room_number, primary_room_type, room_types, capacity = dlg.get_data()
 
         if not room_number:
             QMessageBox.warning(
@@ -350,6 +347,14 @@ class RoomsPage(QWidget):
             )
             return
 
+        if not primary_room_type:
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Не удалось определить главный тип аудитории.",
+            )
+            return
+
         if int(capacity) <= 0:
             QMessageBox.warning(
                 self,
@@ -362,7 +367,7 @@ class RoomsPage(QWidget):
             self._rooms_repo.update(
                 id_room=int(room_id),
                 room_number=room_number,
-                room_type=room_type,
+                room_type=primary_room_type,
                 room_types=room_types,
                 capacity=int(capacity),
                 building=None,

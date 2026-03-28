@@ -32,7 +32,7 @@ ROOM_SPECIALIZATION_RANK = {
     "lecture": 3,
     "classroom": 4,
 }
-
+VALID_ROOM_TYPES = set(ROOM_SPECIALIZATION_RANK.keys())
 
 def _positive_int(value, default: int = 0) -> int:
     try:
@@ -50,15 +50,22 @@ def _optional_int(value) -> Optional[int]:
         return None
     return v if v > 0 else None
 
-
 def _parse_room_types(room: Room | None) -> set[str]:
     """
-    Поддержка новой модели:
+    Поддержка актуальной модели аудитории:
     - сначала читаем room.room_types;
-    - если его нет, откатываемся на legacy room.room_type.
+    - если его нет или оно пустое, откатываемся к legacy room.room_type.
 
-    room.room_types может быть list[str]
-    room.room_type может быть одной строкой или legacy-строкой через запятую
+    Поддерживаются:
+    - tuple[str, ...]
+    - list[str]
+    - итерируемые коллекции строк
+
+    Дополнительно:
+    - приводим значения к lower();
+    - убираем пустые и неизвестные типы;
+    - legacy-строку room_type поддерживаем как одиночное значение
+      или как старую строку через запятую.
     """
     if room is None:
         return set()
@@ -67,9 +74,10 @@ def _parse_room_types(room: Room | None) -> set[str]:
     if raw_room_types:
         result = {
             str(x).strip().lower()
-            for x in list(raw_room_types)
+            for x in raw_room_types
             if str(x).strip()
         }
+        result = {x for x in result if x in VALID_ROOM_TYPES}
         if result:
             return result
 
@@ -77,16 +85,17 @@ def _parse_room_types(room: Room | None) -> set[str]:
     if not raw_room_type:
         return set()
 
-    return {
+    result = {
         x.strip().lower()
         for x in str(raw_room_type).split(",")
         if x.strip()
     }
+    return {x for x in result if x in VALID_ROOM_TYPES}
 
 
 def _room_matches_required(room: Room, required_room_type: str) -> bool:
     required = str(required_room_type or "").strip().lower()
-    if not required:
+    if required not in VALID_ROOM_TYPES:
         return False
     return required in _parse_room_types(room)
 
@@ -113,18 +122,18 @@ def _room_priority_penalty(room: Room, required_room_type: str) -> int:
     - для lecture использовать lab/computer — хуже.
     """
     required = str(required_room_type or "").strip().lower()
-    room_types = _parse_room_types(room)
+    if required not in VALID_ROOM_TYPES:
+        return 10_000
 
+    room_types = _parse_room_types(room)
     if required not in room_types:
         return 10_000
 
-    required_rank = ROOM_SPECIALIZATION_RANK.get(required, 999)
-    if required_rank == 999:
-        return 10_000
+    required_rank = ROOM_SPECIALIZATION_RANK[required]
 
     # Самый "сильный" тип аудитории = минимальный rank.
     strongest_room_rank = min(
-        (ROOM_SPECIALIZATION_RANK.get(t, 999) for t in room_types),
+        (ROOM_SPECIALIZATION_RANK[t] for t in room_types if t in ROOM_SPECIALIZATION_RANK),
         default=999,
     )
 
@@ -134,7 +143,6 @@ def _room_priority_penalty(room: Room, required_room_type: str) -> int:
     # Если аудитория более специализирована, чем нужно,
     # даём штраф за перерасход ресурса.
     return max(0, required_rank - strongest_room_rank)
-
 
 def _day_key(slot: TimeSlot) -> Tuple[int, int]:
     """

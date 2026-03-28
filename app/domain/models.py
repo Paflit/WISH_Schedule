@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional, List
 
+
 @dataclass(frozen=True)
 class Teacher:
     """
@@ -41,11 +42,26 @@ class Subject:
 
 @dataclass(frozen=True)
 class Room:
+    """
+    Доменная модель аудитории.
+
+    room_type:
+        основной (приоритетный) тип аудитории.
+        Нужен для обратной совместимости и для существующей логики,
+        где ожидается один главный тип.
+
+    room_types:
+        полный набор поддерживаемых типов аудитории.
+        Это поле используется для корректной работы с аудиториями,
+        которые одновременно подходят под несколько типологий
+        (например, lecture + lab + computer).
+    """
     id_room: int
     room_number: str
     room_type: str
     capacity: int
     building: Optional[str] = None
+    room_types: tuple[str, ...] = field(default_factory=tuple)
 
 
 # ============================================================
@@ -123,6 +139,7 @@ class SemesterPlan:
 class WeeklyLoadPlan:
     """
     Недельный план нагрузки.
+
     Используем week_id как первичный ориентир.
     """
     id_week_plan: int
@@ -150,7 +167,6 @@ class Event:
     subject_id: int
     part_type: str
     required_room_type: str
-
     fixed_week_number: Optional[int] = None
     fixed_week_type: Optional[int] = None
 

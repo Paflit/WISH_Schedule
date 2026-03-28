@@ -664,6 +664,7 @@ class SqliteGroupsRepository:
 
 class SqliteRoomsRepository:
     ROOM_TYPE_PRIORITY = ["lab", "computer", "lecture", "classroom"]
+    VALID_ROOM_TYPES = set(ROOM_TYPE_PRIORITY)
 
     def __init__(self, session_factory):
         self._session_factory = session_factory
@@ -684,20 +685,15 @@ class SqliteRoomsRepository:
             v = str(value or "").strip().lower()
             if not v:
                 continue
-            if v not in {"lab", "computer", "lecture", "classroom"}:
+            if v not in self.VALID_ROOM_TYPES:
                 continue
             if v in seen:
                 continue
+
             seen.add(v)
             normalized.append(v)
 
-        # сортируем по приоритету
-        normalized.sort(
-            key=lambda x: self.ROOM_TYPE_PRIORITY.index(x)
-            if x in self.ROOM_TYPE_PRIORITY
-            else 999
-        )
-
+        normalized.sort(key=lambda x: self.ROOM_TYPE_PRIORITY.index(x))
         return normalized
 
     def _primary_room_type(
@@ -797,27 +793,37 @@ class SqliteRoomsRepository:
 
     def _parse_room_types(self, row: dict) -> list[str]:
         raw_json = row.get("room_types_json")
+
         if raw_json:
             try:
                 data = json.loads(raw_json)
-                if isinstance(data, list):
-                    result = []
-                    for value in data:
-                        v = str(value or "").strip().lower()
-                        if v and v not in result:
-                            result.append(v)
-                    if result:
-                        result.sort(
-                            key=lambda x: self.ROOM_TYPE_PRIORITY.index(x)
-                            if x in self.ROOM_TYPE_PRIORITY
-                            else 999
-                        )
-                        return result
-            except Exception:
-                pass
+            except (TypeError, ValueError, json.JSONDecodeError):
+                data = None
 
-        room_type = str(row.get("room_type") or "").strip().lower()
-        return [room_type] if room_type else []
+            if isinstance(data, list):
+                return self._normalize_room_types(
+                    room_types=[str(value) for value in data]
+                )
+
+        return self._normalize_room_types(
+            room_type=str(row.get("room_type") or "").strip().lower()
+        )
+
+    def _room_from_row(self, row: dict) -> Room:
+        parsed_types = tuple(self._parse_room_types(row))
+        primary_type = self._primary_room_type(
+            room_type=str(row.get("room_type") or "").strip().lower(),
+            room_types=list(parsed_types),
+        )
+
+        return Room(
+            id_room=int(row["id_class"]),
+            room_number=str(row["room_number"]),
+            room_type=primary_type,
+            capacity=_positive_int(row["capacity"], 0),
+            building=row.get("building"),
+            room_types=parsed_types,
+        )
 
     def list_all(self) -> List[Room]:
         with self._session_factory() as conn:
@@ -830,22 +836,7 @@ class SqliteRoomsRepository:
                 """
             ).fetchall()
 
-        result: List[Room] = []
-        for r in rows:
-            room = Room(
-                id_room=int(r["id_class"]),
-                room_number=str(r["room_number"]),
-                room_type=str(r["room_type"]),
-                capacity=_positive_int(r["capacity"], 0),
-                building=r.get("building"),
-            )
-            try:
-                setattr(room, "room_types", self._parse_room_types(r))
-            except Exception:
-                pass
-            result.append(room)
-
-        return result
+            return [self._room_from_row(r) for r in rows]
 
     def get_by_id(self, id_room: int) -> Optional[Room]:
         with self._session_factory() as conn:
@@ -854,21 +845,11 @@ class SqliteRoomsRepository:
                 "SELECT * FROM Classes WHERE id_class=?",
                 (int(id_room),),
             ).fetchone()
-        if not row:
-            return None
 
-        room = Room(
-            id_room=int(row["id_class"]),
-            room_number=str(row["room_number"]),
-            room_type=str(row["room_type"]),
-            capacity=_positive_int(row["capacity"], 0),
-            building=row.get("building"),
-        )
-        try:
-            setattr(room, "room_types", self._parse_room_types(row))
-        except Exception:
-            pass
-        return room
+            if not row:
+                return None
+
+            return self._room_from_row(row)
 
 # ============================================================
 # Calendar Repository
