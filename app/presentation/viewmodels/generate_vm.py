@@ -10,14 +10,6 @@ from app.application.dto.schedule_dto import GenerationResultDTO, ScheduleVarian
 
 @dataclass(frozen=True)
 class GenerateFormState:
-    """
-    Состояние формы генерации.
-
-    Пользователь выбирает только календарь.
-    Остальные параметры генерации фиксированы внутри логики:
-    - variants_count = 1
-    - time_limit_seconds = 600
-    """
 
     calendar_id: Optional[int] = None
 
@@ -40,13 +32,6 @@ class GenerateFormState:
 class GenerateViewModel(QObject):
     """
     Лёгкий ViewModel страницы генерации.
-
-    Важно:
-    - не содержит устаревших полей вроде rule_profile_key / random_seed / created_by;
-    - не даёт пользователю управлять количеством вариантов и лимитом времени;
-    - не запускает генерацию напрямую;
-    - хранит только состояние формы и последний результат/ошибку;
-    - пригоден как тонкая прослойка между UI и worker-based pipeline.
     """
 
     formChanged = pyqtSignal(object)

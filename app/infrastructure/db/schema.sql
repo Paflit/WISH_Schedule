@@ -148,6 +148,30 @@ CREATE TABLE IF NOT EXISTS ScheduleVariants (
     FOREIGN KEY (calendar_id) REFERENCES AcademicCalendar(id_calendar) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS GenerationDrafts (
+    id_draft INTEGER PRIMARY KEY AUTOINCREMENT,
+    calendar_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    comment TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (calendar_id) REFERENCES AcademicCalendar(id_calendar) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS GenerationDraftEntries (
+    id_draft_entry INTEGER PRIMARY KEY AUTOINCREMENT,
+    draft_id INTEGER NOT NULL,
+    event_id INTEGER NOT NULL,
+    slot_id INTEGER NOT NULL,
+    teacher_id INTEGER,
+    room_id INTEGER,
+    comment TEXT,
+    FOREIGN KEY (draft_id) REFERENCES GenerationDrafts(id_draft) ON DELETE CASCADE,
+    FOREIGN KEY (slot_id) REFERENCES TimeSlots(id_slot) ON DELETE CASCADE,
+    FOREIGN KEY (teacher_id) REFERENCES Teachers(id_teacher) ON DELETE SET NULL,
+    FOREIGN KEY (room_id) REFERENCES Classes(id_class) ON DELETE SET NULL,
+    UNIQUE (draft_id, event_id)
+);
+
 CREATE TABLE IF NOT EXISTS ScheduleEntries (
     id_schedule INTEGER PRIMARY KEY AUTOINCREMENT,
     variant_id INTEGER NOT NULL,
@@ -243,6 +267,12 @@ CREATE INDEX IF NOT EXISTS idx_weekly_load_plan
 
 CREATE INDEX IF NOT EXISTS idx_schedule_variants_calendar
     ON ScheduleVariants(calendar_id);
+
+CREATE INDEX IF NOT EXISTS idx_generation_drafts_calendar
+    ON GenerationDrafts(calendar_id);
+
+CREATE INDEX IF NOT EXISTS idx_generation_draft_entries_draft
+    ON GenerationDraftEntries(draft_id);
 
 CREATE INDEX IF NOT EXISTS idx_schedule_entries_variant
     ON ScheduleEntries(variant_id);

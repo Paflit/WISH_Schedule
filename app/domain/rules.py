@@ -1,20 +1,3 @@
-"""
-Правила (constraints) и профили оптимизации.
-
-Содержит:
-- SchedulingRules: параметры регламента и веса штрафов (soft)
-- DefaultRuleProfiles: наборы готовых профилей для UI:
-    - students (комфорт студентов)
-    - teachers (комфорт преподавателей)
-    - balanced (баланс)
-    - rooms (акцент на аудитории) — задел
-
-ВАЖНО:
-- Это доменные настройки, не зависят от БД/Qt.
-- В идеале их можно хранить в БД (SchedulingRules table),
-  но для MVP держим дефолты здесь.
-"""
-
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -49,11 +32,6 @@ class SchedulingRules:
 
 
 class DefaultRuleProfiles:
-    """
-    Готовые профили оптимизации.
-    GUI показывает их в выпадающем списке.
-    """
-
     def __init__(self) -> None:
         self._profiles: Dict[str, SchedulingRules] = {
             # Акцент на отсутствие окон и адекватную нагрузку студентов

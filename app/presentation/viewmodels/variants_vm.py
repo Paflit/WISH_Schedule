@@ -1,16 +1,3 @@
-"""
-VariantsViewModel
-
-ViewModel для страницы вариантов расписания.
-
-Задачи:
-- загрузить семестры (календарь)
-- загрузить список вариантов по семестру
-- утвердить/архивировать/переименовать вариант через SaveVariantUseCase
-
-UI получает плоские dict-объекты для таблицы.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -38,8 +25,6 @@ class VariantsViewModel(BaseViewModel):
         self.schedule_repo = container.schedule_repo
         self.save_variant_uc = container.save_variant_uc
 
-    # ---------------------------------------------------------
-
     def load_calendars(self) -> List[Dict]:
         def _load():
             calendars = self.calendar_repo.list_all()
@@ -65,8 +50,6 @@ class VariantsViewModel(BaseViewModel):
             ]
 
         return self.execute(_load) or []
-
-    # ---------------------------------------------------------
 
     def set_status(self, variant_id: int, status: str) -> bool:
         def _run():

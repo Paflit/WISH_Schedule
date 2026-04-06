@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -24,15 +25,6 @@ from PyQt6.QtWidgets import (
 
 
 class RoomEditDialog(QDialog):
-    """
-    Диалог создания / редактирования аудитории.
-
-    Актуальная модель:
-    - ID не вводится вручную;
-    - обязательно есть номер/название аудитории;
-    - аудитория может поддерживать несколько типов одновременно;
-    - обязательно есть вместимость.
-    """
 
     ROOM_TYPES = [
         ("Лаборатория", "lab"),
@@ -160,24 +152,24 @@ class RoomEditDialog(QDialog):
 
 
 class RoomsPage(QWidget):
-    """
-    Страница аудиторий.
-
-    Показывает:
-    - ID
-    - номер/название аудитории
-    - список типов аудитории
-    - вместимость
-    """
 
     def __init__(self, rooms_repo):
         super().__init__()
         self._rooms_repo = rooms_repo
+        self._all_rows: list[object] = []
+        self._sort_column: Optional[int] = None
+        self._sort_order: int = 0
 
         root = QVBoxLayout(self)
 
         toolbar = QHBoxLayout()
         root.addLayout(toolbar)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Поиск по таблице...")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMaximumWidth(260)
+        toolbar.addWidget(self.search_edit)
 
         toolbar.addStretch(1)
 
@@ -201,6 +193,7 @@ class RoomsPage(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().sectionClicked.connect(self._toggle_sort)
         self.table.setColumnWidth(0, 70)
         self.table.setColumnWidth(1, 220)
         self.table.setColumnWidth(2, 240)
@@ -215,6 +208,7 @@ class RoomsPage(QWidget):
         self.edit_btn.clicked.connect(self._edit_room)
         self.delete_btn.clicked.connect(self._delete_room)
         self.refresh_btn.clicked.connect(self.refresh)
+        self.search_edit.textChanged.connect(self._apply_filters)
 
         self.refresh()
 
@@ -417,12 +411,68 @@ class RoomsPage(QWidget):
 
     def refresh(self) -> None:
         try:
-            rows = self._rooms_repo.list_all()
+            self._all_rows = list(self._rooms_repo.list_all())
         except Exception as exc:
             self.table.setRowCount(0)
             self._set_status(f"Не удалось загрузить аудитории: {exc}", error=True)
             return
 
+        self._apply_filters()
+
+    def _toggle_sort(self, column: int) -> None:
+        if self._sort_column != column:
+            self._sort_column = column
+            self._sort_order = 1
+        elif self._sort_order == 1:
+            self._sort_order = -1
+        else:
+            self._sort_column = None
+            self._sort_order = 0
+
+        self._apply_filters()
+
+    def _apply_filters(self) -> None:
+        rows = list(self._all_rows)
+        query = self.search_edit.text().strip().lower()
+
+        if query:
+            filtered = []
+            for room in rows:
+                haystack = " ".join(
+                    [
+                        str(getattr(room, "id_room", "") or ""),
+                        str(getattr(room, "room_number", "") or ""),
+                        self._room_types_label(room),
+                        str(getattr(room, "capacity", "") or ""),
+                    ]
+                ).lower()
+                if query in haystack:
+                    filtered.append(room)
+            rows = filtered
+
+        if self._sort_column is not None and self._sort_order != 0:
+            key_map = {
+                0: lambda x: int(getattr(x, "id_room", 0) or 0),
+                1: lambda x: str(getattr(x, "room_number", "") or "").lower(),
+                2: lambda x: self._room_types_label(x).lower(),
+                3: lambda x: int(getattr(x, "capacity", 0) or 0),
+            }
+            rows.sort(key=key_map[self._sort_column], reverse=self._sort_order < 0)
+
+        self._update_header_labels()
+        self._render_rows(rows)
+
+    def _update_header_labels(self) -> None:
+        base_headers = ["ID", "Аудитория", "Типы аудитории", "Вместимость"]
+        headers = []
+        for idx, title in enumerate(base_headers):
+            if self._sort_column == idx:
+                headers.append(f"{title} {'▲' if self._sort_order > 0 else '▼' if self._sort_order < 0 else ''}".strip())
+            else:
+                headers.append(title)
+        self.table.setHorizontalHeaderLabels(headers)
+
+    def _render_rows(self, rows: list[object]) -> None:
         self.table.setRowCount(0)
 
         for row_idx, room in enumerate(rows):

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import random
+import re
 from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
 
 from ortools.sat.python import cp_model
@@ -22,7 +24,7 @@ from app.domain.rules import SchedulingRules
 # Константы и helpers
 # ============================================================
 
-MAX_ROOMS_PER_EVENT = 8
+MAX_ROOMS_PER_EVENT = 4
 MAX_SLOTS_PER_EVENT = 32
 
 # Чем меньше число — тем более специализированная аудитория.
@@ -51,45 +53,7 @@ def _optional_int(value) -> Optional[int]:
     return v if v > 0 else None
 
 def _parse_room_types(room: Room | None) -> set[str]:
-    """
-    Поддержка актуальной модели аудитории:
-    - сначала читаем room.room_types;
-    - если его нет или оно пустое, откатываемся к legacy room.room_type.
-
-    Поддерживаются:
-    - tuple[str, ...]
-    - list[str]
-    - итерируемые коллекции строк
-
-    Дополнительно:
-    - приводим значения к lower();
-    - убираем пустые и неизвестные типы;
-    - legacy-строку room_type поддерживаем как одиночное значение
-      или как старую строку через запятую.
-    """
-    if room is None:
-        return set()
-
-    raw_room_types = getattr(room, "room_types", None)
-    if raw_room_types:
-        result = {
-            str(x).strip().lower()
-            for x in raw_room_types
-            if str(x).strip()
-        }
-        result = {x for x in result if x in VALID_ROOM_TYPES}
-        if result:
-            return result
-
-    raw_room_type = getattr(room, "room_type", None)
-    if not raw_room_type:
-        return set()
-
-    result = {
-        x.strip().lower()
-        for x in str(raw_room_type).split(",")
-        if x.strip()
-    }
+    result = Room.parse_room_types(room)
     return {x for x in result if x in VALID_ROOM_TYPES}
 
 
@@ -106,20 +70,7 @@ def _room_priority_penalty(room: Room, required_room_type: str) -> int:
 
     Логика:
     - если аудитория не поддерживает требуемый тип -> большой штраф;
-    - если поддерживает, то штраф зависит от того,
-      насколько аудитория "слишком специализирована" для этой задачи.
-
-    Приоритет специализации:
-    1. lab
-    2. computer
-    3. lecture
-    4. classroom
-
-    Пример:
-    - для classroom использовать lab — плохо;
-    - для lab использовать lab — нормально;
-    - для lecture использовать lecture — нормально;
-    - для lecture использовать lab/computer — хуже.
+    - если поддерживает, то штраф зависит от того, насколько аудитория "слишком специализирована" для этой задачи.
     """
     required = str(required_room_type or "").strip().lower()
     if required not in VALID_ROOM_TYPES:
@@ -146,17 +97,101 @@ def _room_priority_penalty(room: Room, required_room_type: str) -> int:
 
 def _day_key(slot: TimeSlot) -> Tuple[int, int]:
     """
-    Основа day-key:
-    - week_type
-    - day_of_week
-
-    week_number_in_semester используем отдельно только когда событие
-    жёстко привязано к конкретной неделе.
+    Для генерации шаблонного расписания работаем на уровне двух чередующихся
+    недель, поэтому ограничения должны различать именно тип недели.
     """
     return (
         _positive_int(getattr(slot, "week_type", 0)),
         _positive_int(getattr(slot, "day_of_week", 0)),
     )
+
+
+def _sample_slots_evenly(slots: List[TimeSlot], limit: int) -> List[TimeSlot]:
+    """
+    Сокращает список слотов, стараясь сохранить равномерное покрытие семестра.
+    Простое усечение первых N слотов приводит к перекосу в начало семестра
+    и ухудшает качество/реализуемость модели. Здесь берём слоты равномерно
+    по отсортированному списку.
+    """
+    if limit <= 0 or len(slots) <= limit:
+        return list(slots)
+
+    if limit == 1:
+        return [slots[0]]
+
+    result: List[TimeSlot] = []
+    last_index = len(slots) - 1
+    for i in range(limit):
+        idx = round(i * last_index / (limit - 1))
+        result.append(slots[idx])
+
+    # Убираем возможные дубли после round, сохраняя порядок.
+    seen: set[int] = set()
+    unique_result: List[TimeSlot] = []
+    for slot in result:
+        slot_id = _positive_int(getattr(slot, "id_slot", 0))
+        if slot_id in seen:
+            continue
+        seen.add(slot_id)
+        unique_result.append(slot)
+
+    if len(unique_result) == limit:
+        return unique_result
+
+    for slot in slots:
+        slot_id = _positive_int(getattr(slot, "id_slot", 0))
+        if slot_id in seen:
+            continue
+        seen.add(slot_id)
+        unique_result.append(slot)
+        if len(unique_result) >= limit:
+            break
+
+    return unique_result[:limit]
+
+
+def _canonical_template_slots(slots: List[TimeSlot]) -> List[TimeSlot]:
+    """
+    Оставляет по одному репрезентативному слоту на каждую комбинацию (week_type, day_of_week, pair_number).
+    Это переводит solver с уровня всех недель семестра на уровень шаблона
+    двух чередующихся недель.
+    """
+    result: List[TimeSlot] = []
+    seen: set[tuple[int, int, int]] = set()
+
+    for slot in sorted(
+        slots,
+        key=lambda s: (
+            _positive_int(getattr(s, "week_number_in_semester", 0)),
+            _positive_int(getattr(s, "week_type", 0)),
+            _positive_int(getattr(s, "day_of_week", 0)),
+            _positive_int(getattr(s, "pair_number", 0)),
+            _positive_int(getattr(s, "id_slot", 0)),
+        ),
+    ):
+        key = (
+            _positive_int(getattr(slot, "week_type", 0)),
+            _positive_int(getattr(slot, "day_of_week", 0)),
+            _positive_int(getattr(slot, "pair_number", 0)),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(slot)
+
+    return result
+
+
+def _detect_subgroup_kind(subject_name: str) -> str:
+    name = str(subject_name or "").strip().lower()
+    if not name:
+        return "none"
+
+    if re.search(r"п\s*/\s*гр\.?\s*1", name):
+        return "subgroup_1"
+    if re.search(r"п\s*/\s*гр\.?\s*2", name):
+        return "subgroup_2"
+    return "none"
 
 
 def _or_bool(
@@ -228,8 +263,10 @@ class FeasibilityIssue:
     event_id: int
     reason: str
     subject_id: int
+    subject_name: str
     part_type: str
     group_ids: Tuple[int, ...]
+    group_names: Tuple[str, ...]
     candidate_teachers: int
     candidate_rooms: int
     candidate_slots: int
@@ -276,12 +313,6 @@ class _SolutionCollector(cp_model.CpSolverSolutionCallback):
         if len(self.solutions) >= self._k_solutions:
             self.StopSearch()
 
-
-# ============================================================
-# Solver
-# ============================================================
-
-
 class CPSatScheduleSolver:
     """
     Solver на OR-Tools CP-SAT.
@@ -311,6 +342,7 @@ class CPSatScheduleSolver:
         time_limit_seconds: int,
         random_seed: int,
         locks: Optional[List[ScheduleLock]] = None,
+        subject_names_by_id: Optional[Dict[int, str]] = None,
     ) -> List[Solution]:
         if not events:
             return []
@@ -329,6 +361,8 @@ class CPSatScheduleSolver:
         k_solutions = max(1, _positive_int(k_solutions, 1))
         time_limit_seconds = max(1, _positive_int(time_limit_seconds, 30))
         random_seed = max(1, _positive_int(random_seed, 1))
+
+        slots = _canonical_template_slots(slots)
 
         slot_by_id = {int(s.id_slot): s for s in slots}
         group_by_id = {int(g.id_group): g for g in groups}
@@ -366,6 +400,8 @@ class CPSatScheduleSolver:
             teacher_availability=teacher_availability,
             group_by_id=group_by_id,
             lock_map=lock_map,
+            subject_names_by_id=subject_names_by_id or {},
+            random_seed=random_seed,
         )
 
         if feasibility_issues:
@@ -382,13 +418,23 @@ class CPSatScheduleSolver:
             for idx, _opt in enumerate(options):
                 x[(eid, idx)] = model.NewBoolVar(f"x_e{eid}_o{idx}")
 
+        event_slot_assigned: Dict[Tuple[int, int], cp_model.IntVar] = {}
+        for eid, options in event_options.items():
+            slot_to_lits: DefaultDict[int, List[cp_model.IntVar]] = defaultdict(list)
+            for idx, (slot_id, _teacher_id, _room_id, _room_penalty) in enumerate(options):
+                slot_to_lits[int(slot_id)].append(x[(eid, idx)])
+
+            for slot_id, lits in slot_to_lits.items():
+                event_slot_assigned[(eid, int(slot_id))] = _or_bool(
+                    model,
+                    lits,
+                    f"event_{eid}_slot_{slot_id}_assigned",
+                )
+
         # Каждое событие должно быть назначено ровно в одну опцию.
         for eid, options in event_options.items():
             model.Add(sum(x[(eid, idx)] for idx in range(len(options))) == 1)
 
-        # ----------------------------------------------------
-        # Жёсткие ограничения конфликтов по слотам
-        # ----------------------------------------------------
         group_usage: DefaultDict[Tuple[int, int], List[cp_model.IntVar]] = defaultdict(list)
         teacher_usage: DefaultDict[Tuple[int, int], List[cp_model.IntVar]] = defaultdict(list)
         room_usage: DefaultDict[Tuple[int, int], List[cp_model.IntVar]] = defaultdict(list)
@@ -457,9 +503,64 @@ class CPSatScheduleSolver:
             if len(lits) > 1:
                 model.Add(sum(lits) <= 1)
 
-        # ----------------------------------------------------
-        # Teacher hard max per day
-        # ----------------------------------------------------
+        # Подгруппы: дисциплины с пометками п/гр.1 и п/гр.2 не должны идти подряд.
+        subgroup_events: List[Tuple[int, Tuple[int, ...], str]] = []
+        for e in events:
+            eid = _positive_int(getattr(e, "id_event", 0))
+            if eid <= 0:
+                continue
+            subject_id = _positive_int(getattr(e, "subject_id", 0))
+            subject_name = str(subject_names_by_id.get(subject_id, "") or "")
+            subgroup_kind = _detect_subgroup_kind(subject_name)
+            if subgroup_kind == "none":
+                continue
+            group_ids = tuple(
+                _positive_int(gid)
+                for gid in list(getattr(e, "group_ids", []) or [getattr(e, "group_id", 0)])
+                if _positive_int(gid) > 0
+            )
+            subgroup_events.append((eid, group_ids, subgroup_kind))
+
+        if subgroup_events:
+            event_by_id = {int(getattr(e, "id_event", 0)): e for e in events}
+            slot_adjacent_pairs: List[Tuple[int, int]] = []
+            for s1 in study_slots:
+                for s2 in study_slots:
+                    if _positive_int(getattr(s1, "id_slot", 0)) >= _positive_int(getattr(s2, "id_slot", 0)):
+                        continue
+                    if _positive_int(getattr(s1, "week_type", 0)) != _positive_int(getattr(s2, "week_type", 0)):
+                        continue
+                    if _positive_int(getattr(s1, "day_of_week", 0)) != _positive_int(getattr(s2, "day_of_week", 0)):
+                        continue
+                    if abs(
+                        _positive_int(getattr(s1, "pair_number", 0))
+                        - _positive_int(getattr(s2, "pair_number", 0))
+                    ) != 1:
+                        continue
+                    slot_adjacent_pairs.append(
+                        (
+                            _positive_int(getattr(s1, "id_slot", 0)),
+                            _positive_int(getattr(s2, "id_slot", 0)),
+                        )
+                    )
+
+            for i in range(len(subgroup_events)):
+                eid1, groups1, _kind1 = subgroup_events[i]
+                for j in range(i + 1, len(subgroup_events)):
+                    eid2, groups2, _kind2 = subgroup_events[j]
+                    if not set(groups1).intersection(groups2):
+                        continue
+                    for slot1, slot2 in slot_adjacent_pairs:
+                        lit1 = event_slot_assigned.get((eid1, slot1))
+                        lit2 = event_slot_assigned.get((eid2, slot2))
+                        if lit1 is not None and lit2 is not None:
+                            model.Add(lit1 + lit2 <= 1)
+
+                        lit1_rev = event_slot_assigned.get((eid1, slot2))
+                        lit2_rev = event_slot_assigned.get((eid2, slot1))
+                        if lit1_rev is not None and lit2_rev is not None:
+                            model.Add(lit1_rev + lit2_rev <= 1)
+
         teacher_hard_max_pairs = max(
             1,
             _positive_int(getattr(rules, "teacher_hard_max_pairs", 6), 6),
@@ -476,9 +577,6 @@ class CPSatScheduleSolver:
             model.Add(day_load == sum(lits))
             model.Add(day_load <= teacher_hard_max_pairs)
 
-        # ----------------------------------------------------
-        # Soft constraints
-        # ----------------------------------------------------
         objective_terms: List[cp_model.LinearExpr] = []
 
         # 1) Штраф за перерасход типа аудитории
@@ -561,47 +659,10 @@ class CPSatScheduleSolver:
                 * sum(teacher_gap_terms)
             )
 
-        # 5) Окна студентов
-        if not bool(getattr(rules, "allow_student_gaps", False)):
-            student_gap_terms: List[cp_model.LinearExpr] = []
-            for group in groups:
-                gid = _positive_int(getattr(group, "id_group", 0))
-                if gid <= 0:
-                    continue
-
-                for daykey in sorted({key[1] for key in group_day_pair_usage.keys() if key[0] == gid}):
-                    occupied_by_pair: Dict[int, cp_model.IntVar] = {}
-                    for pair in range(1, max_pair + 1):
-                        lits = group_day_pair_usage.get((gid, daykey, pair), [])
-                        if lits:
-                            occupied_by_pair[pair] = _or_bool(
-                                model,
-                                lits,
-                                f"group_{gid}_{daykey[0]}_{daykey[1]}_pair_{pair}_occ",
-                            )
-
-                    if not occupied_by_pair:
-                        continue
-
-                    gaps = _gaps_for_day(
-                        model=model,
-                        occupied_by_pair=occupied_by_pair,
-                        max_pair=max_pair,
-                        name_prefix=f"group_{gid}_{daykey[0]}_{daykey[1]}",
-                        allow_lunch_gap=bool(getattr(rules, "allow_lunch_gap", True)),
-                        lunch_min=_positive_int(getattr(rules, "lunch_gap_min_pair", 2), 2),
-                        lunch_max=_positive_int(getattr(rules, "lunch_gap_max_pair", 3), 3),
-                    )
-                    student_gap_terms.append(gaps)
-
-            if student_gap_terms:
-                objective_terms.append(
-                    _positive_int(getattr(rules, "w_students_gaps", 600), 600)
-                    * sum(student_gap_terms)
-                )
-
-        # 6) Штраф за слишком короткий / слишком длинный день студентов
-        student_day_load_terms: List[cp_model.LinearExpr] = []
+        # 5) Жесткие ограничения для студентов:
+        #    - без окон;
+        #    - от 2 до 5 пар в активный день;
+        #    - не более 5 учебных дней в каждой шаблонной неделе.
         min_pairs_students_per_day = max(
             0,
             _positive_int(getattr(rules, "min_pairs_students_per_day", 2), 2),
@@ -611,36 +672,92 @@ class CPSatScheduleSolver:
             _positive_int(getattr(rules, "max_pairs_students_per_day", 5), 5),
         )
 
-        for (gid, daykey), lits in group_day_usage_any.items():
-            if not lits:
+        all_group_daykeys = sorted({key[1] for key in group_day_usage_any.keys()})
+        all_week_types = sorted({daykey[0] for daykey in all_group_daykeys})
+        all_days_of_week = sorted({daykey[1] for daykey in all_group_daykeys})
+
+        student_gap_terms: List[cp_model.LinearExpr] = []
+        student_day_load_terms: List[cp_model.LinearExpr] = []
+
+        for group in groups:
+            gid = _positive_int(getattr(group, "id_group", 0))
+            if gid <= 0:
                 continue
 
-            has_day = _or_bool(model, lits, f"group_{gid}_{daykey[0]}_{daykey[1]}_has_day")
-            day_load = model.NewIntVar(
-                0,
-                max_pair if max_pair > 0 else len(lits),
-                f"group_{gid}_{daykey[0]}_{daykey[1]}_load",
-            )
-            model.Add(day_load == sum(lits))
+            used_day_flags: Dict[Tuple[int, int], cp_model.IntVar] = {}
 
-            low = model.NewIntVar(
-                0,
-                max_pair,
-                f"group_{gid}_{daykey[0]}_{daykey[1]}_underload",
-            )
-            high = model.NewIntVar(
-                0,
-                max_pair,
-                f"group_{gid}_{daykey[0]}_{daykey[1]}_overload",
-            )
+            for daykey in sorted({key[1] for key in group_day_pair_usage.keys() if key[0] == gid}):
+                occupied_by_pair: Dict[int, cp_model.IntVar] = {}
+                for pair in range(1, max_pair + 1):
+                    lits = group_day_pair_usage.get((gid, daykey, pair), [])
+                    occupied_by_pair[pair] = _or_bool(
+                        model,
+                        lits,
+                        f"group_{gid}_{daykey[0]}_{daykey[1]}_pair_{pair}_occ",
+                    )
 
-            model.Add(low >= min_pairs_students_per_day * has_day - day_load)
-            model.Add(low >= 0)
-            model.Add(high >= day_load - max_pairs_students_per_day)
-            model.Add(high >= 0)
+                has_day = _or_bool(
+                    model,
+                    group_day_usage_any.get((gid, daykey), []),
+                    f"group_{gid}_{daykey[0]}_{daykey[1]}_has_day",
+                )
+                used_day_flags[daykey] = has_day
 
-            student_day_load_terms.append(low)
-            student_day_load_terms.append(high)
+                day_load = model.NewIntVar(
+                    0,
+                    max_pair if max_pair > 0 else len(group_day_usage_any.get((gid, daykey), [])),
+                    f"group_{gid}_{daykey[0]}_{daykey[1]}_load",
+                )
+                model.Add(day_load == sum(occupied_by_pair.values()))
+
+                # Жесткое ограничение: если день активен, то 2..5 пар.
+                model.Add(day_load >= min_pairs_students_per_day * has_day)
+                model.Add(day_load <= max_pairs_students_per_day * has_day)
+
+                # Жесткое отсутствие окон у студентов.
+                gaps = _gaps_for_day(
+                    model=model,
+                    occupied_by_pair=occupied_by_pair,
+                    max_pair=max_pair,
+                    name_prefix=f"group_{gid}_{daykey[0]}_{daykey[1]}",
+                    allow_lunch_gap=False,
+                    lunch_min=0,
+                    lunch_max=0,
+                )
+                model.Add(gaps == 0)
+                student_gap_terms.append(gaps)
+
+                # Soft-термы можно сохранить как нулевые для совместимости панели метрик.
+                low = model.NewIntVar(
+                    0,
+                    max_pair,
+                    f"group_{gid}_{daykey[0]}_{daykey[1]}_underload",
+                )
+                high = model.NewIntVar(
+                    0,
+                    max_pair,
+                    f"group_{gid}_{daykey[0]}_{daykey[1]}_overload",
+                )
+                model.Add(low >= min_pairs_students_per_day * has_day - day_load)
+                model.Add(low >= 0)
+                model.Add(high >= day_load - max_pairs_students_per_day)
+                model.Add(high >= 0)
+                student_day_load_terms.append(low)
+                student_day_load_terms.append(high)
+
+            # Жесткое ограничение: не более 5 учебных дней в каждой шаблонной неделе.
+            for wt in all_week_types:
+                week_day_flags: List[cp_model.IntVar] = []
+                for day in all_days_of_week:
+                    daykey = (wt, day)
+                    flag = used_day_flags.get(daykey)
+                    if flag is None:
+                        flag = model.NewBoolVar(f"group_{gid}_{wt}_{day}_has_day_const")
+                        model.Add(flag == 0)
+                    week_day_flags.append(flag)
+
+                if len(week_day_flags) >= 5:
+                    model.Add(sum(week_day_flags) <= 5)
 
         if student_day_load_terms:
             objective_terms.append(
@@ -755,9 +872,7 @@ class CPSatScheduleSolver:
 
         return collector.solutions
 
-    # ---------------------------------------------------------
-    # Подготовка опций для событий
-    # ---------------------------------------------------------
+
     def _build_event_options(
         self,
         *,
@@ -772,6 +887,8 @@ class CPSatScheduleSolver:
         teacher_availability: Dict[Tuple[int, int], bool],
         group_by_id: Dict[int, StudentGroup],
         lock_map: Dict[int, ScheduleLock],
+        subject_names_by_id: Dict[int, str],
+        random_seed: int,
     ) -> Tuple[Dict[int, List[Tuple[int, int, int, int]]], List[FeasibilityIssue]]:
         event_options: Dict[int, List[Tuple[int, int, int, int]]] = {}
         issues: List[FeasibilityIssue] = []
@@ -788,8 +905,10 @@ class CPSatScheduleSolver:
                         event_id=0,
                         reason="Некорректный id_event.",
                         subject_id=subject_id,
+                        subject_name=str(getattr(e, "subject_name", "") or ""),
                         part_type=part_type,
                         group_ids=tuple(),
+                        group_names=tuple(),
                         candidate_teachers=0,
                         candidate_rooms=0,
                         candidate_slots=0,
@@ -804,8 +923,10 @@ class CPSatScheduleSolver:
                         event_id=eid,
                         reason=f"Не найден CurriculumItem для curriculum_id={curriculum_id}.",
                         subject_id=subject_id,
+                        subject_name=str(getattr(e, "subject_name", "") or ""),
                         part_type=part_type,
                         group_ids=tuple(),
+                        group_names=tuple(),
                         candidate_teachers=0,
                         candidate_rooms=0,
                         candidate_slots=0,
@@ -825,8 +946,10 @@ class CPSatScheduleSolver:
                         event_id=eid,
                         reason="У события нет group_ids/group_id.",
                         subject_id=subject_id,
+                        subject_name=str(getattr(e, "subject_name", "") or ""),
                         part_type=part_type,
                         group_ids=tuple(),
+                        group_names=tuple(),
                         candidate_teachers=0,
                         candidate_rooms=0,
                         candidate_slots=0,
@@ -836,12 +959,20 @@ class CPSatScheduleSolver:
 
             total_group_size = 0
             group_missing = False
+            group_names: List[str] = []
             for gid in group_ids:
                 grp = group_by_id.get(gid)
                 if grp is None:
                     group_missing = True
                     break
                 total_group_size += _positive_int(getattr(grp, "quantity", 0))
+                group_names.append(str(getattr(grp, "group_name", "") or f"id={gid}"))
+
+            subject_name = str(getattr(e, "subject_name", "") or "").strip()
+            if not subject_name:
+                subject_name = str(subject_names_by_id.get(subject_id, "") or "").strip()
+            if not subject_name:
+                subject_name = f"ID={subject_id}"
 
             if group_missing:
                 issues.append(
@@ -849,8 +980,10 @@ class CPSatScheduleSolver:
                         event_id=eid,
                         reason="Для одной из групп события не найдена запись StudentGroup.",
                         subject_id=subject_id,
+                        subject_name=subject_name,
                         part_type=part_type,
                         group_ids=group_ids,
+                        group_names=tuple(group_names),
                         candidate_teachers=0,
                         candidate_rooms=0,
                         candidate_slots=0,
@@ -914,7 +1047,6 @@ class CPSatScheduleSolver:
                     _positive_int(getattr(s, "id_slot", 0)),
                 )
             )
-            candidate_slots = candidate_slots[:MAX_SLOTS_PER_EVENT]
 
             lk = lock_map.get(eid)
             if lk is not None and lk.slot_id is not None:
@@ -933,6 +1065,29 @@ class CPSatScheduleSolver:
                     for r in candidate_rooms
                     if _positive_int(getattr(r, "id_room", 0)) == lk.room_id
                 ]
+
+            if candidate_teachers and candidate_slots:
+                candidate_slots = [
+                    s
+                    for s in candidate_slots
+                    if any(
+                        teacher_availability.get(
+                            (
+                                _positive_int(getattr(t, "id_teacher", 0)),
+                                _positive_int(getattr(s, "id_slot", 0)),
+                            ),
+                            True,
+                        )
+                        for t in candidate_teachers
+                    )
+                ]
+
+            candidate_slots = _sample_slots_evenly(candidate_slots, MAX_SLOTS_PER_EVENT)
+
+            event_rng = random.Random(int(random_seed) * 1000003 + int(eid))
+            event_rng.shuffle(candidate_teachers)
+            event_rng.shuffle(candidate_rooms)
+            event_rng.shuffle(candidate_slots)
 
             opts: List[Tuple[int, int, int, int]] = []
             for s in candidate_slots:
@@ -956,6 +1111,9 @@ class CPSatScheduleSolver:
                         penalty = _room_priority_penalty(r, required_room_type)
                         opts.append((sid, tid, rid, _positive_int(penalty, 0)))
 
+            if opts:
+                event_rng.shuffle(opts)
+
             if not opts:
                 reason_parts: List[str] = []
                 if not candidate_teachers:
@@ -972,8 +1130,10 @@ class CPSatScheduleSolver:
                         event_id=eid,
                         reason="; ".join(reason_parts) if reason_parts else "не найдено допустимых комбинаций",
                         subject_id=subject_id,
+                        subject_name=subject_name,
                         part_type=part_type,
                         group_ids=group_ids,
+                        group_names=tuple(group_names),
                         candidate_teachers=len(candidate_teachers),
                         candidate_rooms=len(candidate_rooms),
                         candidate_slots=len(candidate_slots),
@@ -985,18 +1145,18 @@ class CPSatScheduleSolver:
 
         return event_options, issues
 
-    # ---------------------------------------------------------
-    # Ошибки / статусы
-    # ---------------------------------------------------------
     def _format_feasibility_issues(self, issues: List[FeasibilityIssue]) -> str:
         head = "Невозможно запустить solver: найдены события без допустимых назначений."
         lines = [head]
 
         for issue in issues[:10]:
+            group_text = ", ".join(issue.group_names) if issue.group_names else ", ".join(
+                f"id={gid}" for gid in issue.group_ids
+            )
             lines.append(
                 (
-                    f"- event_id={issue.event_id}, groups={list(issue.group_ids)}, "
-                    f"subject_id={issue.subject_id}, part_type={issue.part_type}: {issue.reason} "
+                    f"- event_id={issue.event_id}, группы=[{group_text}], "
+                    f"дисциплина='{issue.subject_name}', part_type={issue.part_type}: {issue.reason} "
                     f"(teachers={issue.candidate_teachers}, rooms={issue.candidate_rooms}, slots={issue.candidate_slots})"
                 )
             )

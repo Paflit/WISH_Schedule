@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from types import SimpleNamespace
 from typing import Optional
 
 from PyQt6.QtCore import Qt
@@ -17,12 +18,17 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
     QInputDialog,
 )
 
 from app.presentation.viewmodels.editor_vm import EditorCellItem, EditorViewModel
+from app.presentation.pages.drafts_page import DraftEntryDialog
+from app.presentation.widgets.metrics_panel import MetricsPanel
 
 
 DAY_NAMES = {
@@ -276,25 +282,41 @@ class EntryEditDialog(QDialog):
 
 
 class ScheduleCellFrame(QFrame):
-    def __init__(self, item: EditorCellItem, on_open):
+    def __init__(self, item: EditorCellItem, on_open, on_select=None, editable: bool = False):
         super().__init__()
         self.item = item
         self._on_open = on_open
+        self._on_select = on_select
+        self._editable = bool(editable)
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet(
-            """
-            QFrame {
-                border: 1px solid #bfc7d5;
-                border-radius: 6px;
-                background: #f7f9fc;
-            }
-            QFrame:hover {
-                background: #eef3fb;
-            }
-            """
-        )
+        self.setCursor(Qt.CursorShape.PointingHandCursor if self._editable else Qt.CursorShape.ArrowCursor)
+        if self._editable:
+            self.setStyleSheet(
+                """
+                QFrame {
+                    border: 1px solid #7f56d9;
+                    border-radius: 6px;
+                    background: #f5f3ff;
+                }
+                QFrame:hover {
+                    background: #ede9fe;
+                }
+                """
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QFrame {
+                    border: 1px solid #bfc7d5;
+                    border-radius: 6px;
+                    background: #f7f9fc;
+                }
+                QFrame:hover {
+                    background: #eef3fb;
+                }
+                """
+            )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -315,10 +337,65 @@ class ScheduleCellFrame(QFrame):
             lock_label.setStyleSheet("color: #8a5a00; font-size: 11px;")
             layout.addWidget(lock_label)
 
+    def mousePressEvent(self, event):
+        if callable(self._on_select):
+            self._on_select(int(self.item.id_schedule))
+        if self._editable and callable(self._on_open):
+            self._on_open(int(self.item.id_schedule))
+        super().mousePressEvent(event)
+
     def mouseDoubleClickEvent(self, event):
-        if callable(self._on_open):
+        if callable(self._on_select):
+            self._on_select(int(self.item.id_schedule))
+        if self._editable and callable(self._on_open):
             self._on_open(int(self.item.id_schedule))
         super().mouseDoubleClickEvent(event)
+
+
+class EmptyScheduleCellFrame(QFrame):
+    def __init__(self, *, on_open=None, editable: bool = False):
+        super().__init__()
+        self._on_open = on_open
+        self._editable = bool(editable)
+
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if self._editable else Qt.CursorShape.ArrowCursor)
+        self.setStyleSheet(
+            """
+            QFrame {
+                border: 1px dashed #cbd5e1;
+                border-radius: 6px;
+                background: #ffffff;
+            }
+            QFrame:hover {
+                background: #f8fafc;
+            }
+            """
+            if not self._editable else
+            """
+            QFrame {
+                border: 1px dashed #7f56d9;
+                border-radius: 6px;
+                background: #faf5ff;
+            }
+            QFrame:hover {
+                background: #f3e8ff;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        label = QLabel("Нажмите для добавления" if self._editable else "—")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setWordWrap(True)
+        label.setStyleSheet("color: #7f56d9; font-weight: 600;" if self._editable else "color: #98a2b3;")
+        layout.addWidget(label)
+
+    def mousePressEvent(self, event):
+        if self._editable and callable(self._on_open):
+            self._on_open()
+        super().mousePressEvent(event)
 
 
 class EditorPage(QWidget):
@@ -326,84 +403,36 @@ class EditorPage(QWidget):
     MODE_TEACHER = "По преподавателям"
     MODE_ROOM = "По аудиториям"
 
-    def __init__(self, vm: EditorViewModel):
+    def __init__(self, vm: EditorViewModel, calendar_repo=None):
         super().__init__()
         self.vm = vm
+        self._calendar_repo = calendar_repo
+        self._event_builder = None
+        self._config = None
+        self._groups_repo = None
+        self._subjects_repo = None
+        self._rooms_repo = None
+        self._teachers_repo = None
 
         self._current_entry_id: Optional[int] = None
+        self._preview_variant_id: Optional[int] = None
+        self._calendar_edit_mode = False
 
         root = QVBoxLayout(self)
+        self.stack = QStackedWidget()
+        root.addWidget(self.stack, 1)
 
-        top_bar = QHBoxLayout()
-        root.addLayout(top_bar)
+        self._build_selector_page()
+        self._build_detail_page()
 
-        self.variant_combo = QComboBox()
-        self.refresh_btn = QPushButton("Обновить")
-        self.edit_btn = QPushButton("Редактировать запись")
-        self.edit_btn.setEnabled(False)
-
-        self.view_mode_combo = QComboBox()
-        self.view_mode_combo.addItems(
-            [
-                self.MODE_GROUP,
-                self.MODE_TEACHER,
-                self.MODE_ROOM,
-            ]
-        )
-
-        self.entity_combo = QComboBox()
-
-        self.week_filter_combo = QComboBox()
-        self.week_filter_combo.addItem("1 неделя", 1)
-        self.week_filter_combo.addItem("2 неделя", 2)
-
-        top_bar.addWidget(QLabel("Вариант:"))
-        top_bar.addWidget(self.variant_combo, 2)
-        top_bar.addWidget(QLabel("Режим:"))
-        top_bar.addWidget(self.view_mode_combo, 1)
-        top_bar.addWidget(QLabel("Сущность:"))
-        top_bar.addWidget(self.entity_combo, 2)
-        top_bar.addWidget(QLabel("Неделя:"))
-        top_bar.addWidget(self.week_filter_combo, 1)
-        top_bar.addWidget(self.refresh_btn)
-        top_bar.addWidget(self.edit_btn)
-
-        splitter = QSplitter()
-        root.addWidget(splitter, 1)
-
-        self.grid_container = QWidget()
-        self.grid_layout = QGridLayout(self.grid_container)
-        self.grid_layout.setContentsMargins(6, 6, 6, 6)
-        self.grid_layout.setSpacing(6)
-        splitter.addWidget(self.grid_container)
-
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        splitter.addWidget(right_panel)
-
-        self.info_label = QLabel("Выберите вариант расписания.")
-        self.info_label.setWordWrap(True)
-        right_layout.addWidget(self.info_label)
-
-        right_layout.addWidget(QLabel("Записи выбранной сущности:"))
-
-        self.entries_list = QListWidget()
-        right_layout.addWidget(self.entries_list, 1)
-
-        self.selected_title = QLabel("Запись не выбрана.")
-        self.selected_title.setWordWrap(True)
-        right_layout.addWidget(self.selected_title)
-
-        self.status_label = QLabel("")
-        self.status_label.setWordWrap(True)
-        right_layout.addWidget(self.status_label)
-
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 2)
-
+        self.selector_refresh_btn.clicked.connect(self._populate_variants)
+        self.selector_open_btn.clicked.connect(self._open_selected_variant)
+        self.calendar_combo.currentIndexChanged.connect(self._calendar_changed)
+        self.variants_table.itemSelectionChanged.connect(self._variant_selection_changed)
+        self.variants_table.itemDoubleClicked.connect(self._open_selected_variant)
+        self.back_btn.clicked.connect(self._show_selector_page)
         self.refresh_btn.clicked.connect(self._reload_current_variant)
-        self.edit_btn.clicked.connect(self._open_current_entry_editor)
-        self.variant_combo.currentIndexChanged.connect(self._variant_changed)
+        self.edit_btn.clicked.connect(self._toggle_calendar_edit_mode)
         self.view_mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self.entity_combo.currentIndexChanged.connect(self._render_current_variant)
         self.week_filter_combo.currentIndexChanged.connect(self._render_current_variant)
@@ -416,50 +445,340 @@ class EditorPage(QWidget):
         self.vm.infoChanged.connect(self._on_info_changed)
         self.vm.errorChanged.connect(self._on_error_changed)
 
+        self._load_calendars()
+        self._populate_variants()
+        self._show_selector_page()
+
+    def configure_creation_support(
+        self,
+        *,
+        event_builder,
+        config,
+        groups_repo,
+        subjects_repo,
+        rooms_repo,
+        teachers_repo,
+    ) -> None:
+        self._event_builder = event_builder
+        self._config = config
+        self._groups_repo = groups_repo
+        self._subjects_repo = subjects_repo
+        self._rooms_repo = rooms_repo
+        self._teachers_repo = teachers_repo
+
+    def _build_selector_page(self) -> None:
+        page = QWidget()
+        root = QVBoxLayout(page)
+
+        top_bar = QHBoxLayout()
+        root.addLayout(top_bar)
+
+        self.calendar_combo = QComboBox()
+        self.selector_refresh_btn = QPushButton("Обновить")
+        self.selector_open_btn = QPushButton("Открыть вариант")
+        self.selector_open_btn.setEnabled(False)
+
+        top_bar.addWidget(QLabel("Календарь:"))
+        top_bar.addWidget(self.calendar_combo, 2)
+        top_bar.addStretch(1)
+        top_bar.addWidget(self.selector_refresh_btn)
+        top_bar.addWidget(self.selector_open_btn)
+
+        splitter = QSplitter()
+        splitter.setChildrenCollapsible(False)
+        root.addWidget(splitter, 1)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.addWidget(QLabel("Варианты расписания"))
+
+        self.variants_table = QTableWidget(0, 4)
+        self.variants_table.setHorizontalHeaderLabels(["ID", "Название", "Score", "Создан"])
+        self.variants_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.variants_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.variants_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.variants_table.verticalHeader().setVisible(False)
+        self.variants_table.setAlternatingRowColors(True)
+        self.variants_table.setColumnWidth(0, 70)
+        self.variants_table.setColumnWidth(1, 220)
+        self.variants_table.setColumnWidth(2, 90)
+        left_layout.addWidget(self.variants_table, 1)
+        splitter.addWidget(left_panel)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+
+        self.selector_title_label = QLabel("Вариант не выбран.")
+        self.selector_title_label.setWordWrap(True)
+        self.selector_title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+        right_layout.addWidget(self.selector_title_label)
+
+        self.selector_metrics_panel = MetricsPanel()
+        right_layout.addWidget(self.selector_metrics_panel)
+
+        right_layout.addWidget(QLabel("Краткая сводка варианта:"))
+        self.selector_summary_list = QListWidget()
+        right_layout.addWidget(self.selector_summary_list, 1)
+
+        self.selector_status_label = QLabel("Выберите вариант расписания для просмотра.")
+        self.selector_status_label.setWordWrap(True)
+        right_layout.addWidget(self.selector_status_label)
+
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
+        self.stack.addWidget(page)
+
+    def _build_detail_page(self) -> None:
+        page = QWidget()
+        root = QVBoxLayout(page)
+
+        top_bar = QHBoxLayout()
+        root.addLayout(top_bar)
+
+        self.back_btn = QPushButton("Назад к вариантам")
+        self.refresh_btn = QPushButton("Обновить вариант")
+        self.edit_btn = QPushButton("Редактировать календарь")
+
+        self.view_mode_combo = QComboBox()
+        self.view_mode_combo.addItems([
+            self.MODE_GROUP,
+            self.MODE_TEACHER,
+            self.MODE_ROOM,
+        ])
+
+        self.entity_combo = QComboBox()
+
+        self.week_filter_combo = QComboBox()
+        self.week_filter_combo.addItem("1 неделя", 1)
+        self.week_filter_combo.addItem("2 неделя", 2)
+
+        top_bar.addWidget(self.back_btn)
+        top_bar.addWidget(QLabel("Режим:"))
+        top_bar.addWidget(self.view_mode_combo, 1)
+        top_bar.addWidget(QLabel("Сущность:"))
+        top_bar.addWidget(self.entity_combo, 2)
+        top_bar.addWidget(QLabel("Неделя:"))
+        top_bar.addWidget(self.week_filter_combo, 1)
+        top_bar.addStretch(1)
+        top_bar.addWidget(self.refresh_btn)
+        top_bar.addWidget(self.edit_btn)
+
+        self.grid_container = QWidget()
+        self.grid_layout = QGridLayout(self.grid_container)
+        self.grid_layout.setContentsMargins(6, 6, 6, 6)
+        self.grid_layout.setSpacing(6)
+        self.info_label = QLabel("Выберите вариант расписания.")
+        self.info_label.setWordWrap(True)
+        self.info_label.hide()
+
+        self.metrics_panel = MetricsPanel()
+        self.metrics_panel.hide()
+
+        self.entries_list = QListWidget()
+        self.entries_list.hide()
+
+        self.selected_title = QLabel("Запись не выбрана.")
+        self.selected_title.setWordWrap(True)
+        self.selected_title.hide()
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        self.status_label.hide()
+
+        root.addWidget(self.grid_container, 1)
+        self.stack.addWidget(page)
+
+    def _load_calendars(self) -> None:
+        self.calendar_combo.blockSignals(True)
+        self.calendar_combo.clear()
+        if self._calendar_repo is not None:
+            try:
+                calendars = self._calendar_repo.list_calendars()
+            except Exception as exc:
+                self.selector_status_label.setText(f"Не удалось загрузить календари: {exc}")
+                self.calendar_combo.blockSignals(False)
+                return
+
+            for cal in calendars:
+                label = (
+                    f"{getattr(cal, 'academic_year', '')} | "
+                    f"семестр {getattr(cal, 'semester', '')} "
+                    f"(id={getattr(cal, 'id_calendar', '')})"
+                )
+                self.calendar_combo.addItem(label, int(cal.id_calendar))
+
+        self.calendar_combo.blockSignals(False)
+
+    def _calendar_changed(self) -> None:
         self._populate_variants()
 
     def _populate_variants(self) -> None:
-        self.variant_combo.blockSignals(True)
-        self.variant_combo.clear()
+        self._preview_variant_id = None
+        self.variants_table.setRowCount(0)
+        self.selector_open_btn.setEnabled(False)
+        self.selector_title_label.setText("Вариант не выбран.")
+        self.selector_summary_list.clear()
+        self.selector_metrics_panel.set_metrics({})
+        calendar_id = self.calendar_combo.currentData()
 
         try:
-            variants = self.vm._schedule_repo.list_variants()
-        except Exception as exc:
-            self.status_label.setText(f"Не удалось загрузить список вариантов: {exc}")
-            self.variant_combo.blockSignals(False)
-            return
-
-        for variant in variants:
-            self.variant_combo.addItem(
-                f"{variant.name} (id={int(variant.id_variant)})",
-                int(variant.id_variant),
+            variants = self.vm._schedule_repo.list_variants(
+                calendar_id=int(calendar_id) if calendar_id is not None else None
             )
-
-        self.variant_combo.blockSignals(False)
-
-        if self.variant_combo.count() > 0:
-            self.variant_combo.setCurrentIndex(0)
-            self._variant_changed()
-
-    def _variant_changed(self) -> None:
-        variant_id = self.variant_combo.currentData()
-        if variant_id is None:
+        except Exception as exc:
+            self.selector_status_label.setText(f"Не удалось загрузить список вариантов: {exc}")
             return
+
+        for row_idx, variant in enumerate(variants):
+            self.variants_table.insertRow(row_idx)
+            variant_id = int(getattr(variant, "id_variant", 0) or 0)
+            id_item = QTableWidgetItem(str(variant_id))
+            id_item.setData(Qt.ItemDataRole.UserRole, variant_id)
+            self.variants_table.setItem(row_idx, 0, id_item)
+            self.variants_table.setItem(row_idx, 1, QTableWidgetItem(str(getattr(variant, "name", "") or "")))
+            self.variants_table.setItem(row_idx, 2, QTableWidgetItem(str(int(getattr(variant, "objective_score", 0) or 0))))
+            self.variants_table.setItem(row_idx, 3, QTableWidgetItem(str(getattr(variant, "created_at", "") or "")))
+
+        if self.variants_table.rowCount() > 0:
+            self.variants_table.selectRow(0)
+            self._variant_selection_changed()
+        else:
+            self.selector_status_label.setText("В выбранном календаре нет вариантов расписания.")
+
+    def _selected_variant_id(self) -> Optional[int]:
+        row = self.variants_table.currentRow()
+        if row < 0:
+            return None
+        item = self.variants_table.item(row, 0)
+        if item is None:
+            return None
+        value = item.data(Qt.ItemDataRole.UserRole)
+        if value is None:
+            return None
+        return int(value)
+
+    def _variant_selection_changed(self) -> None:
+        variant_id = self._selected_variant_id()
+        if variant_id is None:
+            self._preview_variant_id = None
+            self.selector_open_btn.setEnabled(False)
+            return
+        self._preview_variant_id = int(variant_id)
+        self.selector_open_btn.setEnabled(True)
+        self._load_variant_preview(int(variant_id))
+
+    def _load_variant_preview(self, variant_id: int) -> None:
+        try:
+            dto = self.vm._schedule_repo.get_variant_dto(int(variant_id))
+        except Exception as exc:
+            self.selector_status_label.setText(f"Не удалось загрузить вариант id={variant_id}: {exc}")
+            self.selector_open_btn.setEnabled(False)
+            return
+
+        entries = list(dto.entries or [])
+        self.selector_title_label.setText(
+            f"{dto.name}<br><span style='font-size:12px; color:#667085;'>"
+            f"id={int(dto.id_variant)}, записей: {len(entries)}</span>"
+        )
+        self.selector_metrics_panel.set_metrics(
+            {
+                "objective_score": int(getattr(dto, "objective_score", 0) or 0),
+                "entries_count": len(entries),
+                "groups_count": len({int(e.group_id) for e in entries if int(e.group_id) > 0}),
+                "teachers_count": len({int(e.teacher_id) for e in entries if int(e.teacher_id) > 0}),
+                "rooms_count": len({int(e.room_id) for e in entries if int(e.room_id) > 0}),
+                "locked_entries": len([e for e in entries if bool(e.is_locked)]),
+            }
+        )
+
+        self.selector_summary_list.clear()
+        for text in self._build_preview_rows(dto):
+            self.selector_summary_list.addItem(QListWidgetItem(text))
+
+        self.selector_status_label.setText(
+            f"Выбран вариант '{dto.name}'. Нажмите 'Открыть вариант' для перехода к календарю."
+        )
+
+    def _build_preview_rows(self, dto) -> list[str]:
+        entries = sorted(
+            list(dto.entries or []),
+            key=lambda e: (
+                int(e.week_number),
+                int(e.week_type),
+                int(e.day_of_week),
+                int(e.pair_number),
+                str(e.group_name),
+                str(e.subject_name),
+            ),
+        )
+
+        rows: list[str] = []
+        for entry in entries[:30]:
+            rows.append(
+                f"{DAY_NAMES.get(int(entry.day_of_week), str(entry.day_of_week))}, "
+                f"{int(entry.pair_number)} пара - {entry.group_name} | {entry.subject_name}"
+            )
+        if len(entries) > 30:
+            rows.append(f"... ещё записей: {len(entries) - 30}")
+        if not rows:
+            rows.append("В этом варианте пока нет записей.")
+        return rows
+
+    def _open_selected_variant(self, *_args) -> None:
+        variant_id = self._preview_variant_id or self._selected_variant_id()
+        if variant_id is None:
+            QMessageBox.information(self, "Не выбрано", "Сначала выберите вариант расписания.")
+            return
+        self.open_variant(int(variant_id))
+
+    def open_variant(self, variant_id: int) -> None:
+        self._set_calendar_edit_mode(False)
+        variant_row = self.vm._schedule_repo.get_variant(int(variant_id))
+        if variant_row is not None:
+            calendar_id = int(getattr(variant_row, "calendar_id", 0) or 0)
+            idx = self.calendar_combo.findData(calendar_id)
+            if idx >= 0 and idx != self.calendar_combo.currentIndex():
+                self.calendar_combo.setCurrentIndex(idx)
+            else:
+                self._populate_variants()
+
+            for row_idx in range(self.variants_table.rowCount()):
+                item = self.variants_table.item(row_idx, 0)
+                if item is None:
+                    continue
+                value = item.data(Qt.ItemDataRole.UserRole)
+                if int(value or 0) == int(variant_id):
+                    self.variants_table.selectRow(row_idx)
+                    break
+
         self.vm.load_variant(int(variant_id))
+        self._show_detail_page()
 
     def _reload_current_variant(self) -> None:
         self.vm.refresh()
 
     def _on_variant_loaded(self, variant) -> None:
         self._current_entry_id = None
-        self.edit_btn.setEnabled(False)
         self.selected_title.setText("Запись не выбрана.")
+        entries = list(variant.entries or [])
+        self.metrics_panel.set_metrics(
+            {
+                "objective_score": int(getattr(variant, "objective_score", 0) or 0),
+                "entries_count": len(entries),
+                "groups_count": len({int(e.group_id) for e in entries if int(e.group_id) > 0}),
+                "teachers_count": len({int(e.teacher_id) for e in entries if int(e.teacher_id) > 0}),
+                "rooms_count": len({int(e.room_id) for e in entries if int(e.room_id) > 0}),
+                "locked_entries": len([e for e in entries if bool(e.is_locked)]),
+            }
+        )
         self._rebuild_entity_filter(variant)
         self._render_variant(variant)
+        self._show_detail_page()
 
     def _on_entry_selected(self, entry) -> None:
         self._current_entry_id = int(entry.id_schedule)
-        self.edit_btn.setEnabled(True)
         self.selected_title.setText(
             f"<b>{entry.subject_name}</b> ({entry.part_type})<br>"
             f"{entry.group_name} | {entry.teacher_name} | {entry.room_number}<br>"
@@ -475,7 +794,6 @@ class EditorPage(QWidget):
 
     def _on_edit_applied(self, entry) -> None:
         self._current_entry_id = int(entry.id_schedule)
-        self.edit_btn.setEnabled(True)
 
     def _on_info_changed(self, text: str) -> None:
         self.info_label.setText(text or "")
@@ -487,12 +805,47 @@ class EditorPage(QWidget):
         else:
             self.status_label.setText("")
 
+    def _show_selector_page(self) -> None:
+        self._set_calendar_edit_mode(False)
+        self.stack.setCurrentIndex(0)
+
+    def _show_detail_page(self) -> None:
+        self.stack.setCurrentIndex(1)
+
+    def _set_calendar_edit_mode(self, enabled: bool) -> None:
+        self._calendar_edit_mode = bool(enabled)
+        if self._calendar_edit_mode and self._selected_mode() != self.MODE_GROUP:
+            idx = self.view_mode_combo.findText(self.MODE_GROUP)
+            if idx >= 0:
+                self.view_mode_combo.setCurrentIndex(idx)
+
+        if self._calendar_edit_mode:
+            self.edit_btn.setText("Завершить редактирование")
+            self.edit_btn.setStyleSheet("font-weight: 600; color: #7f56d9;")
+        else:
+            self.edit_btn.setText("Редактировать календарь")
+            self.edit_btn.setStyleSheet("")
+
+        self._render_current_variant()
+
+    def _toggle_calendar_edit_mode(self) -> None:
+        self._set_calendar_edit_mode(not self._calendar_edit_mode)
+
     def _selected_week_number(self) -> int:
         value = self.week_filter_combo.currentData()
         return int(value)
 
     def _selected_mode(self) -> str:
         return str(self.view_mode_combo.currentText())
+
+    def _current_calendar_id(self) -> Optional[int]:
+        if self.vm.current_variant_id is None:
+            return None
+        variant_row = self.vm._schedule_repo.get_variant(int(self.vm.current_variant_id))
+        if variant_row is None:
+            return None
+        calendar_id = int(getattr(variant_row, "calendar_id", 0) or 0)
+        return calendar_id if calendar_id > 0 else None
 
     def _selected_entity_key(self) -> Optional[tuple[str, int]]:
         value = self.entity_combo.currentData()
@@ -513,6 +866,9 @@ class EditorPage(QWidget):
     def _on_mode_changed(self) -> None:
         variant = self.vm.current_variant
         if variant is None:
+            return
+        if self._calendar_edit_mode and self._selected_mode() != self.MODE_GROUP:
+            self._set_calendar_edit_mode(False)
             return
         self._rebuild_entity_filter(variant)
         self._render_variant(variant)
@@ -562,10 +918,7 @@ class EditorPage(QWidget):
         selected_entity = self._selected_entity_key()
         selected_week = self._selected_week_number()
 
-        entries = [
-            e for e in variant.entries
-            if int(e.week_type) == int(selected_week)
-        ]
+        entries = [e for e in variant.entries if int(e.week_type) == int(selected_week)]
 
         if not entries:
             self.grid_layout.addWidget(QLabel("Нет записей для выбранного фильтра."), 0, 0)
@@ -584,49 +937,63 @@ class EditorPage(QWidget):
             self._fill_entries_list([])
             return
 
-        days = sorted({int(e.day_of_week) for e in entries})
-        pairs = sorted({int(e.pair_number) for e in entries})
+        days, pairs = self._grid_dimensions_for_week(selected_week, entries)
 
-        self.grid_layout.addWidget(QLabel("День / пара"), 0, 0)
+        corner = QLabel(self._entity_label(selected_entity))
+        corner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        corner.setStyleSheet("font-weight: 600;")
+        self.grid_layout.addWidget(corner, 0, 0)
 
-        col = 1
         day_columns = []
-        for day in days:
-            for pair in pairs:
-                header = QLabel(f"{DAY_NAMES.get(day, str(day))}\n{pair} пара")
-                header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                header.setStyleSheet("font-weight: 600;")
-                self.grid_layout.addWidget(header, 0, col)
-                day_columns.append((day, pair, col))
-                col += 1
+        for col_idx, day in enumerate(days, start=1):
+            header = QLabel(DAY_NAMES.get(day, str(day)))
+            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            header.setStyleSheet("font-weight: 600;")
+            self.grid_layout.addWidget(header, 0, col_idx)
+            day_columns.append((day, col_idx))
 
-        entity_label = QLabel(self._entity_label(selected_entity))
-        entity_label.setStyleSheet("font-weight: 600;")
-        self.grid_layout.addWidget(entity_label, 1, 0)
+        pair_rows = []
+        for row_idx, pair in enumerate(pairs, start=1):
+            pair_label = QLabel(f"{pair} пара")
+            pair_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pair_label.setStyleSheet("font-weight: 600;")
+            self.grid_layout.addWidget(pair_label, row_idx, 0)
+            pair_rows.append((pair, row_idx))
 
         grouped = defaultdict(list)
         for e in entries:
             grouped[(int(e.day_of_week), int(e.pair_number))].append(e)
 
-        for day, pair, col_idx in day_columns:
-            cell_widget = QWidget()
-            cell_layout = QVBoxLayout(cell_widget)
-            cell_layout.setContentsMargins(2, 2, 2, 2)
-            cell_layout.setSpacing(4)
+        for pair, row_idx in pair_rows:
+            for day, col_idx in day_columns:
+                cell_widget = QWidget()
+                cell_layout = QVBoxLayout(cell_widget)
+                cell_layout.setContentsMargins(2, 2, 2, 2)
+                cell_layout.setSpacing(4)
 
-            cell_entries = grouped.get((day, pair), [])
-            for dto in cell_entries:
-                item = EditorCellItem.from_dto(dto)
-                frame = ScheduleCellFrame(item, self._open_editor_for_entry)
-                cell_layout.addWidget(frame)
+                cell_entries = grouped.get((day, pair), [])
+                for dto in cell_entries:
+                    item = EditorCellItem.from_dto(dto)
+                    frame = ScheduleCellFrame(
+                        item,
+                        self._open_editor_for_entry,
+                        self.vm.select_entry,
+                        editable=self._calendar_edit_mode and mode == self.MODE_GROUP,
+                    )
+                    cell_layout.addWidget(frame)
 
-            if not cell_entries:
-                empty = QLabel("—")
-                empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                empty.setStyleSheet("color: #98a2b3;")
-                cell_layout.addWidget(empty)
+                if not cell_entries:
+                    slot_id = self._slot_id_for_cell(selected_week, day, pair)
+                    empty = EmptyScheduleCellFrame(
+                        editable=self._calendar_edit_mode and mode == self.MODE_GROUP and slot_id is not None,
+                        on_open=(
+                            lambda sid=slot_id, d=day, p=pair: self._open_empty_cell_editor(sid, d, p)
+                            if slot_id is not None else None
+                        ),
+                    )
+                    cell_layout.addWidget(empty)
 
-            self.grid_layout.addWidget(cell_widget, 1, col_idx)
+                self.grid_layout.addWidget(cell_widget, row_idx, col_idx)
 
         self._fill_entries_list(entries)
 
@@ -643,6 +1010,146 @@ class EditorPage(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, int(e.id_schedule))
             self.entries_list.addItem(item)
 
+    def _grid_dimensions_for_week(self, week_type: int, entries) -> tuple[list[int], list[int]]:
+        calendar_repo = getattr(self.vm._apply_manual_edit_uc, "_calendar_repo", None)
+        if calendar_repo is None or self.vm.current_variant_id is None:
+            days = sorted({int(e.day_of_week) for e in entries})
+            pairs = sorted({int(e.pair_number) for e in entries})
+            return days, pairs
+
+        variant_row = self.vm._schedule_repo.get_variant(int(self.vm.current_variant_id))
+        if variant_row is None:
+            days = sorted({int(e.day_of_week) for e in entries})
+            pairs = sorted({int(e.pair_number) for e in entries})
+            return days, pairs
+
+        calendar_id = int(getattr(variant_row, "calendar_id", 0) or 0)
+        slots = [
+            s for s in calendar_repo.list_time_slots(calendar_id)
+            if not bool(getattr(s, "is_lunch_break", False))
+            and int(getattr(s, "week_type", 0) or 0) == int(week_type)
+        ]
+
+        days = sorted({int(getattr(s, "day_of_week", 0) or 0) for s in slots})
+        pairs = sorted({int(getattr(s, "pair_number", 0) or 0) for s in slots})
+
+        if not days:
+            days = sorted({int(e.day_of_week) for e in entries})
+        if not pairs:
+            pairs = sorted({int(e.pair_number) for e in entries})
+
+        return days, pairs
+
+    def _slot_id_for_cell(self, week_type: int, day: int, pair: int) -> Optional[int]:
+        calendar_id = self._current_calendar_id()
+        if calendar_id is None or self._calendar_repo is None:
+            return None
+        for slot in self._calendar_repo.list_time_slots(int(calendar_id)):
+            if bool(getattr(slot, "is_lunch_break", False)):
+                continue
+            if int(getattr(slot, "week_type", 0) or 0) != int(week_type):
+                continue
+            if int(getattr(slot, "day_of_week", 0) or 0) != int(day):
+                continue
+            if int(getattr(slot, "pair_number", 0) or 0) != int(pair):
+                continue
+            return int(getattr(slot, "id_slot", 0) or 0)
+        return None
+
+    def _available_events_for_group_week(self, group_id: int, week_type: int) -> list[object]:
+        calendar_id = self._current_calendar_id()
+        if calendar_id is None or self._event_builder is None or self._config is None or self._subjects_repo is None:
+            return []
+
+        subjects_by_id = {
+            int(getattr(s, "id_subject", 0) or 0): s
+            for s in self._subjects_repo.list_all()
+        }
+        used_event_ids = {
+            int(getattr(entry, "event_id", 0) or 0)
+            for entry in (self.vm.current_variant.entries if self.vm.current_variant is not None else [])
+        }
+        events = []
+        for event in self._event_builder.build_events(
+            calendar_id=int(calendar_id),
+            hours_per_pair=int(getattr(self._config, "hours_per_pair", 2) or 2),
+            locks=[],
+        ):
+            if int(getattr(event, "group_id", 0) or 0) != int(group_id):
+                continue
+            if int(getattr(event, "fixed_week_type", 0) or 0) != int(week_type):
+                continue
+            if int(getattr(event, "id_event", 0) or 0) in used_event_ids:
+                continue
+            subject_id = int(getattr(event, "subject_id", 0) or 0)
+            subject = subjects_by_id.get(subject_id)
+            enriched = SimpleNamespace(**event.__dict__)
+            enriched.subject_name = str(getattr(subject, "subject_name", f"ID={subject_id}") or f"ID={subject_id}")
+            events.append(enriched)
+
+        events.sort(key=lambda e: (str(getattr(e, "subject_name", "") or ""), str(getattr(e, "part_type", "") or ""), int(getattr(e, "id_event", 0) or 0)))
+        return events
+
+    def _open_empty_cell_editor(self, slot_id: int, day: int, pair: int) -> None:
+        if not self._calendar_edit_mode or self._selected_mode() != self.MODE_GROUP:
+            return
+        selected_entity = self._selected_entity_key()
+        if selected_entity is None or self.vm.current_variant_id is None:
+            return
+
+        group_id = int(selected_entity[1])
+        week_type = self._selected_week_number()
+        available_events = self._available_events_for_group_week(group_id, week_type)
+        if not available_events:
+            QMessageBox.warning(self, "Нет доступных занятий", "Для выбранной группы и недели все допустимые занятия уже размещены в расписании.")
+            return
+
+        slot_label = f"{DAY_NAMES.get(int(day), str(day))}, {int(pair)} пара, неделя {int(week_type)}"
+        dlg = DraftEntryDialog(
+            self,
+            slot_id=int(slot_id),
+            slot_label=slot_label,
+            available_events=available_events,
+            teachers_repo=self._teachers_repo,
+            teacher_part_matrix=self._teachers_repo.get_teacher_part_matrix(),
+            rooms_repo=self._rooms_repo,
+            groups_repo=self._groups_repo,
+            current_entry=None,
+            current_event=None,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        result = dlg.get_result()
+        event_id = result.get("event_id")
+        selected_event = next(
+            (e for e in available_events if int(getattr(e, "id_event", 0) or 0) == int(event_id or 0)),
+            None,
+        )
+        if selected_event is None:
+            QMessageBox.warning(self, "Ошибка", "Нужно выбрать дисциплину для добавления.")
+            return
+
+        teacher_id = result.get("teacher_id")
+        room_id = result.get("room_id")
+        if teacher_id is None or room_id is None:
+            QMessageBox.warning(self, "Ошибка", "Для готового расписания нужно выбрать преподавателя и аудиторию.")
+            return
+
+        created = self.vm.create_entry(
+            event_id=int(getattr(selected_event, "id_event", 0) or 0),
+            curriculum_id=int(getattr(selected_event, "curriculum_id", 0) or 0),
+            slot_id=int(slot_id),
+            group_id=int(getattr(selected_event, "group_id", 0) or 0),
+            teacher_id=int(teacher_id),
+            room_id=int(room_id),
+            comment="Добавление из editor_page",
+            edited_by="editor_page",
+            lock_after_edit=True,
+        )
+        if created is not None:
+            QMessageBox.information(self, "Сохранено", "Запись успешно добавлена.")
+
     def _list_item_clicked(self, item: QListWidgetItem) -> None:
         entry_id = item.data(Qt.ItemDataRole.UserRole)
         if entry_id is not None:
@@ -654,6 +1161,9 @@ class EditorPage(QWidget):
             self._open_editor_for_entry(int(entry_id))
 
     def _open_current_entry_editor(self) -> None:
+        if self._selected_mode() != self.MODE_GROUP:
+            QMessageBox.information(self, "Редактирование ограничено", "Редактирование расписания сейчас доступно только в режиме 'По группам'.")
+            return
         if self._current_entry_id is None:
             QMessageBox.information(self, "Запись не выбрана", "Сначала выберите запись.")
             return

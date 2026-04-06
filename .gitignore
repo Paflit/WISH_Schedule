@@ -1,0 +1,16 @@
+# PyInstaller / exe build artifacts
+/build/
+/dist/
+/*.spec
+
+# Common Windows executable artifacts
+*.exe
+*.dll
+*.pyd
+
+# PyInstaller caches and reports
+*.pyz
+*.pkg
+*.toc
+warn-*.txt
+xref-*.html

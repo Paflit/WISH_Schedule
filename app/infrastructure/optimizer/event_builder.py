@@ -16,37 +16,8 @@ class LockHint:
 
 
 def _parse_room_types(room) -> set[str]:
-    """
-    Поддержка новой модели:
-    - если у Room есть room_types -> используем их;
-    - иначе откатываемся на старый room_type.
-
-    Важно:
-    - room_types может быть list[str]
-    - room_type может быть одной строкой или legacy-строкой через запятую
-    """
-    if room is None:
-        return set()
-
-    raw_room_types = getattr(room, "room_types", None)
-    if raw_room_types:
-        result = {
-            str(x).strip().lower()
-            for x in list(raw_room_types)
-            if str(x).strip()
-        }
-        if result:
-            return result
-
-    raw_room_type = getattr(room, "room_type", None)
-    if not raw_room_type:
-        return set()
-
-    return {
-        x.strip().lower()
-        for x in str(raw_room_type).split(",")
-        if x.strip()
-    }
+    from app.domain.models import Room
+    return Room.parse_room_types(room)
 
 
 def _room_matches_required(room, required_room_type: str) -> bool:
@@ -81,9 +52,6 @@ class EventBuilder:
         self._rooms_repo = rooms_repo
         self._rules_repo = rules_repo
 
-    # ---------------------------------------------------------
-    # Public
-    # ---------------------------------------------------------
     def build_events(
         self,
         calendar_id: int,
@@ -112,6 +80,7 @@ class EventBuilder:
         weekly_by_plan_id = self._group_weekly_rows_by_plan(weekly_rows)
 
         atomic_events = self._build_atomic_events(
+            calendar_id=calendar_id,
             plans=plans,
             curriculum_items=curriculum_items,
             weekly_by_plan_id=weekly_by_plan_id,
@@ -129,9 +98,6 @@ class EventBuilder:
 
         return self._finalize_events(final_events)
 
-    # ---------------------------------------------------------
-    # Loaders / validators
-    # ---------------------------------------------------------
     def _normalize_locks(self, locks: Optional[list]) -> Dict[int, LockHint]:
         result: Dict[int, LockHint] = {}
         if not locks:
@@ -210,12 +176,10 @@ class EventBuilder:
 
         return True
 
-    # ---------------------------------------------------------
-    # Atomic events
-    # ---------------------------------------------------------
     def _build_atomic_events(
         self,
         *,
+        calendar_id: int,
         plans: List[object],
         curriculum_items: Dict[int, object],
         weekly_by_plan_id: Dict[int, List[object]],
@@ -223,6 +187,7 @@ class EventBuilder:
     ) -> List[SimpleNamespace]:
         events: List[SimpleNamespace] = []
         next_event_id = 1
+        template_week_types, cycle_count = self._template_week_types_and_cycles(calendar_id)
 
         missing_curriculum_ids: List[int] = []
 
@@ -264,20 +229,28 @@ class EventBuilder:
                         next_event_id += 1
             else:
                 total_hours = self._positive_int(getattr(plan, "hours_in_semester", 0))
-                pairs_count = total_hours // hours_per_pair
-                if pairs_count <= 0:
+                pairs_total = total_hours // hours_per_pair
+                if pairs_total <= 0:
                     continue
 
-                for _ in range(pairs_count):
-                    events.append(
-                        self._make_atomic_event(
-                            event_id=next_event_id,
-                            item=item,
-                            fixed_week_number=None,
-                            fixed_week_type=None,
+                # Если weekly plan отсутствует, строим не все пары семестра поштучно, а шаблон двух чередующихся недель.
+                pairs_per_cycle = max(1, round(pairs_total / max(1, cycle_count)))
+                pairs_by_week_type = self._distribute_pairs_by_week_type(
+                    pairs_per_cycle=pairs_per_cycle,
+                    week_types=template_week_types,
+                )
+
+                for fixed_week_type, pairs_count in pairs_by_week_type:
+                    for _ in range(pairs_count):
+                        events.append(
+                            self._make_atomic_event(
+                                event_id=next_event_id,
+                                item=item,
+                                fixed_week_number=None,
+                                fixed_week_type=fixed_week_type,
+                            )
                         )
-                    )
-                    next_event_id += 1
+                        next_event_id += 1
 
         if missing_curriculum_ids and not events:
             missing_str = ", ".join(str(x) for x in sorted(set(missing_curriculum_ids))[:10])
@@ -286,6 +259,55 @@ class EventBuilder:
             )
 
         return events
+
+    def _template_week_types_and_cycles(self, calendar_id: int) -> tuple[List[int], int]:
+        weeks = list(getattr(self._calendar_repo, "list_semester_weeks")(calendar_id) or [])
+        study_weeks = [w for w in weeks if bool(getattr(w, "is_study_week", True))]
+
+        if not study_weeks:
+            return [1, 2], 9
+
+        week_types = sorted(
+            {
+                self._positive_int(getattr(w, "week_type", 0))
+                for w in study_weeks
+                if self._positive_int(getattr(w, "week_type", 0)) > 0
+            }
+        )
+        if not week_types:
+            week_types = [1]
+
+        weeks_by_type: Dict[int, int] = {}
+        for wt in week_types:
+            weeks_by_type[wt] = sum(
+                1 for w in study_weeks if self._positive_int(getattr(w, "week_type", 0)) == wt
+            )
+
+        cycle_count = max(weeks_by_type.values()) if weeks_by_type else len(study_weeks)
+        cycle_count = max(1, cycle_count)
+        return week_types, cycle_count
+
+    def _distribute_pairs_by_week_type(
+        self,
+        *,
+        pairs_per_cycle: int,
+        week_types: List[int],
+    ) -> List[tuple[int, int]]:
+        active_week_types = [wt for wt in week_types if wt > 0] or [1]
+        n = len(active_week_types)
+        base = pairs_per_cycle // n
+        remainder = pairs_per_cycle % n
+
+        result: List[tuple[int, int]] = []
+        for idx, wt in enumerate(active_week_types):
+            count = base + (1 if idx < remainder else 0)
+            if count > 0:
+                result.append((wt, count))
+
+        if not result:
+            result.append((active_week_types[0], 1))
+
+        return result
 
     def _make_atomic_event(
         self,
@@ -318,6 +340,7 @@ class EventBuilder:
             id_event=int(event_id),
             curriculum_id=curriculum_id,
             curriculum_ids=[curriculum_id],
+            group_curriculum_pairs=[(group_id, curriculum_id)],
             group_id=group_id,
             group_ids=[group_id],
             subject_id=subject_id,
@@ -329,9 +352,6 @@ class EventBuilder:
             source_event_ids=[int(event_id)],
         )
 
-    # ---------------------------------------------------------
-    # Merge lectures
-    # ---------------------------------------------------------
     def _group_sizes(self) -> Dict[int, int]:
         groups = self._groups_repo.list_all()
         result: Dict[int, int] = {}
@@ -445,6 +465,7 @@ class EventBuilder:
 
                 group_ids: List[int] = []
                 curriculum_ids: List[int] = []
+                group_curriculum_pairs: List[tuple[int, int]] = []
                 source_event_ids: List[int] = []
 
                 for item in batch:
@@ -458,6 +479,14 @@ class EventBuilder:
                         for x in list(getattr(item, "curriculum_ids", []) or [])
                         if self._positive_int(x) > 0
                     )
+                    group_curriculum_pairs.extend(
+                        (
+                            self._positive_int(group_value),
+                            self._positive_int(curriculum_value),
+                        )
+                        for group_value, curriculum_value in list(getattr(item, "group_curriculum_pairs", []) or [])
+                        if self._positive_int(group_value) > 0 and self._positive_int(curriculum_value) > 0
+                    )
                     source_event_ids.extend(
                         self._positive_int(x)
                         for x in list(getattr(item, "source_event_ids", []) or [])
@@ -466,6 +495,7 @@ class EventBuilder:
 
                 group_ids = list(dict.fromkeys(group_ids))
                 curriculum_ids = list(dict.fromkeys(curriculum_ids))
+                group_curriculum_pairs = list(dict.fromkeys(group_curriculum_pairs))
                 source_event_ids = list(dict.fromkeys(source_event_ids))
 
                 anchor_event_id = min(source_event_ids) if source_event_ids else 0
@@ -477,6 +507,7 @@ class EventBuilder:
                         id_event=anchor_event_id,
                         curriculum_id=anchor_curriculum_id,
                         curriculum_ids=curriculum_ids,
+                        group_curriculum_pairs=group_curriculum_pairs,
                         group_id=anchor_group_id,
                         group_ids=group_ids,
                         subject_id=self._positive_int(getattr(batch[0], "subject_id", 0)),
@@ -512,9 +543,7 @@ class EventBuilder:
         )
         return result
 
-    # ---------------------------------------------------------
-    # Final shape
-    # ---------------------------------------------------------
+
     def _finalize_events(self, events: List[SimpleNamespace]) -> List[SimpleNamespace]:
         """
         Возвращаем компактный, но стабильный набор событий.
@@ -550,6 +579,16 @@ class EventBuilder:
                             if self._positive_int(x) > 0
                         )
                     ),
+                    group_curriculum_pairs=list(
+                        dict.fromkeys(
+                            (
+                                self._positive_int(group_value),
+                                self._positive_int(curriculum_value),
+                            )
+                            for group_value, curriculum_value in list(getattr(event, "group_curriculum_pairs", []) or [])
+                            if self._positive_int(group_value) > 0 and self._positive_int(curriculum_value) > 0
+                        )
+                    ),
                     group_id=self._positive_int(getattr(event, "group_id", 0)),
                     group_ids=list(
                         dict.fromkeys(
@@ -582,9 +621,6 @@ class EventBuilder:
 
         return final_events
 
-    # ---------------------------------------------------------
-    # Helpers
-    # ---------------------------------------------------------
     @staticmethod
     def _positive_int(value, default: int = 0) -> int:
         try:

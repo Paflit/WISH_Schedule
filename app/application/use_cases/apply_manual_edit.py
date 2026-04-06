@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from typing import Optional
 
 from app.application.dto.schedule_dto import ScheduleEntryDTO
+from app.domain.schedule_validation import GroupScheduleLimits, validate_group_week_entries
 from app.domain.exceptions import ValidationError
 
 
@@ -12,7 +13,7 @@ class ApplyManualEditCommand:
     """
     Команда ручного редактирования одной записи расписания.
 
-    Редактирование всегда идёт по id_schedule, а не по event_id.
+    Редактирование всегда идёт по id_schedule.
     Любое поле можно не передавать — тогда останется текущее значение.
     """
 
@@ -50,6 +51,36 @@ class ApplyManualEditResult:
     changed: bool
 
 
+@dataclass(frozen=True)
+class CreateManualEntryCommand:
+    variant_id: int
+    event_id: int
+    curriculum_id: int
+    slot_id: int
+    group_id: int
+    teacher_id: int
+    room_id: int
+    edited_by: str = "manual_editor"
+    comment: Optional[str] = None
+    lock_after_edit: bool = True
+
+    def __post_init__(self) -> None:
+        if int(self.variant_id) <= 0:
+            raise ValidationError("variant_id должен быть положительным числом.")
+        if int(self.event_id) <= 0:
+            raise ValidationError("event_id должен быть положительным числом.")
+        if int(self.curriculum_id) <= 0:
+            raise ValidationError("curriculum_id должен быть положительным числом.")
+        if int(self.slot_id) <= 0:
+            raise ValidationError("slot_id должен быть положительным числом.")
+        if int(self.group_id) <= 0:
+            raise ValidationError("group_id должен быть положительным числом.")
+        if int(self.teacher_id) <= 0:
+            raise ValidationError("teacher_id должен быть положительным числом.")
+        if int(self.room_id) <= 0:
+            raise ValidationError("room_id должен быть положительным числом.")
+
+
 class ApplyManualEditUseCase:
     """
     Ручное редактирование записи готового варианта расписания.
@@ -66,6 +97,7 @@ class ApplyManualEditUseCase:
     """
 
     ACTION_NAME = "manual_edit"
+    CREATE_ACTION_NAME = "manual_create"
 
     def __init__(
         self,
@@ -74,12 +106,14 @@ class ApplyManualEditUseCase:
         groups_repo=None,
         rooms_repo=None,
         calendar_repo=None,
+        rules=None,
     ):
         self._schedule_repo = schedule_repo
         self._teachers_repo = teachers_repo
         self._groups_repo = groups_repo
         self._rooms_repo = rooms_repo
         self._calendar_repo = calendar_repo
+        self._rules = rules
 
     @staticmethod
     def _positive_int(value, default: int = 0) -> int:
@@ -184,6 +218,7 @@ class ApplyManualEditUseCase:
             group_id=int(entry.group_id),
             slot_id=int(entry.slot_id),
             exclude_entry_id=exclude_entry_id,
+            allow_same_event_id=int(entry.event_id) if int(entry.event_id) > 0 else None,
         ):
             raise ValidationError(
                 "Конфликт расписания: у группы уже есть занятие в этот слот."
@@ -194,6 +229,7 @@ class ApplyManualEditUseCase:
             teacher_id=int(entry.teacher_id),
             slot_id=int(entry.slot_id),
             exclude_entry_id=exclude_entry_id,
+            allow_same_event_id=int(entry.event_id) if int(entry.event_id) > 0 else None,
         ):
             raise ValidationError(
                 "Конфликт расписания: преподаватель уже занят в этот слот."
@@ -204,10 +240,46 @@ class ApplyManualEditUseCase:
             room_id=int(entry.room_id),
             slot_id=int(entry.slot_id),
             exclude_entry_id=exclude_entry_id,
+            allow_same_event_id=int(entry.event_id) if int(entry.event_id) > 0 else None,
         ):
             raise ValidationError(
                 "Конфликт расписания: аудитория уже занята в этот слот."
             )
+
+    def _validate_group_schedule_rules(
+        self,
+        before: ScheduleEntryDTO,
+        after: ScheduleEntryDTO,
+    ) -> None:
+        variant_entries = list(self._schedule_repo.list_entries(int(after.variant_id)) or [])
+
+        adjusted_entries: list[ScheduleEntryDTO] = []
+        for entry in variant_entries:
+            if int(entry.id_schedule) == int(before.id_schedule):
+                adjusted_entries.append(after)
+            else:
+                adjusted_entries.append(entry)
+
+        affected_groups = {int(before.group_id), int(after.group_id)}
+        affected_week_types = {int(before.week_type), int(after.week_type)}
+
+        limits = GroupScheduleLimits.from_rules(self._rules)
+
+        for group_id in affected_groups:
+            if int(group_id) <= 0:
+                continue
+            for week_type in affected_week_types:
+                if int(week_type) <= 0:
+                    continue
+
+                errors = validate_group_week_entries(
+                    adjusted_entries,
+                    group_id=int(group_id),
+                    week_type=int(week_type),
+                    limits=limits,
+                )
+                if errors:
+                    raise ValidationError(errors[0])
 
     @staticmethod
     def _is_changed(before: ScheduleEntryDTO, after: ScheduleEntryDTO) -> bool:
@@ -234,6 +306,7 @@ class ApplyManualEditUseCase:
             return ApplyManualEditResult(before=before, after=after, changed=False)
 
         self._validate_conflicts(after)
+        self._validate_group_schedule_rules(before, after)
 
         self._schedule_repo.update_entry(after)
 
@@ -263,3 +336,80 @@ class ApplyManualEditUseCase:
         )
 
         return ApplyManualEditResult(before=before, after=refreshed, changed=True)
+
+    def create_entry(self, command: CreateManualEntryCommand) -> ScheduleEntryDTO:
+        slot_day_of_week = 0
+        slot_pair_number = 0
+        slot_week_number = 0
+        slot_week_type = 0
+        if self._calendar_repo is not None:
+            variant = self._schedule_repo.get_variant(int(command.variant_id))
+            calendar_id = int(getattr(variant, "calendar_id", 0) or 0) if variant is not None else 0
+            if calendar_id > 0:
+                for slot in self._calendar_repo.list_time_slots(calendar_id):
+                    if int(getattr(slot, "id_slot", 0) or 0) != int(command.slot_id):
+                        continue
+                    slot_day_of_week = int(getattr(slot, "day_of_week", 0) or 0)
+                    slot_pair_number = int(getattr(slot, "pair_number", 0) or 0)
+                    slot_week_number = int(getattr(slot, "week_number_in_semester", 0) or 0)
+                    slot_week_type = int(getattr(slot, "week_type", 0) or 0)
+                    break
+
+        draft_entry = ScheduleEntryDTO(
+            id_schedule=0,
+            variant_id=int(command.variant_id),
+            curriculum_id=int(command.curriculum_id),
+            event_id=int(command.event_id),
+            slot_id=int(command.slot_id),
+            week_number=slot_week_number,
+            week_type=slot_week_type,
+            day_of_week=slot_day_of_week,
+            pair_number=slot_pair_number,
+            group_id=int(command.group_id),
+            group_name=self._resolve_group_name(int(command.group_id), ""),
+            teacher_id=int(command.teacher_id),
+            teacher_name=self._resolve_teacher_name(int(command.teacher_id), ""),
+            subject_id=0,
+            subject_name="",
+            part_type="",
+            room_id=int(command.room_id),
+            room_number=self._resolve_room_name(int(command.room_id), ""),
+            is_locked=bool(command.lock_after_edit),
+        )
+
+        self._validate_basic_consistency(draft_entry, draft_entry)
+        self._validate_conflicts(draft_entry)
+
+        variant_entries = list(self._schedule_repo.list_entries(int(command.variant_id)) or [])
+        affected_entries = variant_entries + [draft_entry]
+        by_group = [e for e in affected_entries if int(e.group_id) == int(command.group_id)]
+        if by_group:
+            reference = by_group[0]
+            self._validate_group_schedule_rules(reference, draft_entry)
+
+        schedule_entry_id = self._schedule_repo.create_entry(draft_entry)
+        if command.lock_after_edit:
+            self._schedule_repo.lock_entry(
+                variant_id=int(command.variant_id),
+                schedule_entry_id=int(schedule_entry_id),
+                comment=command.comment,
+            )
+
+        refreshed = self._schedule_repo.get_entry_by_id(
+            int(command.variant_id),
+            int(schedule_entry_id),
+        )
+        if refreshed is None:
+            raise ValidationError(
+                f"После создания не удалось перечитать запись id={schedule_entry_id}."
+            )
+
+        self._schedule_repo.log_edit(
+            variant_id=int(command.variant_id),
+            edited_by=str(command.edited_by or "manual_editor"),
+            action=self.CREATE_ACTION_NAME,
+            before=None,
+            after=refreshed,
+            comment=command.comment,
+        )
+        return refreshed

@@ -6,15 +6,6 @@ from typing import Optional
 
 @dataclass(slots=True)
 class ScheduleEntryDTO:
-    """
-    DTO одной записи готового расписания.
-
-    Важно:
-    - id_schedule — главный идентификатор записи в ScheduleEntries.
-    - event_id — идентификатор generation event, полезен для трассировки
-      и для lock/re-generation сценариев, но не должен использоваться
-      как основной ключ редактирования.
-    """
 
     id_schedule: int
     variant_id: int

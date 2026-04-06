@@ -14,9 +14,6 @@ class Teacher:
     - набор дисциплин
     - допустимые типы занятий по каждой дисциплине
     - календарь доступности
-
-    Поля max/soft/method_day оставлены как технический задел
-    для solver / scoring, даже если в UI они сейчас не редактируются.
     """
     id_teacher: int
     full_name: str
@@ -45,13 +42,11 @@ class Room:
     """
     Доменная модель аудитории.
 
-    room_type:
-        основной (приоритетный) тип аудитории.
+    room_type: основной (приоритетный) тип аудитории.
         Нужен для обратной совместимости и для существующей логики,
         где ожидается один главный тип.
 
-    room_types:
-        полный набор поддерживаемых типов аудитории.
+    room_types: полный набор поддерживаемых типов аудитории.
         Это поле используется для корректной работы с аудиториями,
         которые одновременно подходят под несколько типологий
         (например, lecture + lab + computer).
@@ -63,10 +58,39 @@ class Room:
     building: Optional[str] = None
     room_types: tuple[str, ...] = field(default_factory=tuple)
 
+    @staticmethod
+    def parse_room_types(room: Optional['Room']) -> set[str]:
+        """
+        Парсит типы аудитории из объекта Room.
+        
+        Поддержка актуальной модели аудитории:
+        - сначала читаем room.room_types;
+        - если его нет или оно пустое, откатываемся к legacy room.room_type.
+        """
+        if room is None:
+            return set()
 
-# ============================================================
-# Calendar
-# ============================================================
+        # Сначала пробуем room_types
+        raw_room_types = getattr(room, "room_types", None)
+        if raw_room_types:
+            result = {
+                str(x).strip().lower()
+                for x in raw_room_types
+                if str(x).strip()
+            }
+            if result:
+                return result
+
+        # Откатываемся на room_type
+        raw_room_type = getattr(room, "room_type", None)
+        if not raw_room_type:
+            return set()
+
+        return {
+            x.strip().lower()
+            for x in str(raw_room_type).split(",")
+            if x.strip()
+        }
 
 @dataclass(frozen=True)
 class AcademicCalendar:
@@ -99,21 +123,8 @@ class TimeSlot:
     is_lunch_break: bool = False
 
 
-# ============================================================
-# Curriculum / workload
-# ============================================================
-
 @dataclass(frozen=True)
 class CurriculumItem:
-    """
-    Один элемент учебного плана = одна часть дисциплины для группы.
-
-    part_type:
-    - lecture
-    - practice
-    - computer_practice
-    - lab
-    """
     id_curriculum: int
     group_id: int
     subject_id: int
@@ -123,9 +134,6 @@ class CurriculumItem:
 
 @dataclass(frozen=True)
 class SemesterPlan:
-    """
-    План на выбранное полугодие / semester calendar.
-    """
     id_plan: int
     curriculum_id: int
     calendar_id: int
@@ -137,11 +145,6 @@ class SemesterPlan:
 
 @dataclass(frozen=True)
 class WeeklyLoadPlan:
-    """
-    Недельный план нагрузки.
-
-    Используем week_id как первичный ориентир.
-    """
     id_week_plan: int
     plan_id: int
     week_id: int
@@ -151,16 +154,8 @@ class WeeklyLoadPlan:
     comment: Optional[str] = None
 
 
-# ============================================================
-# Generated event / schedule solution
-# ============================================================
-
 @dataclass(frozen=True)
 class Event:
-    """
-    Одно событие генерации = одна учебная пара,
-    которую нужно поставить в сетку расписания.
-    """
     id_event: int
     curriculum_id: int
     group_id: int
@@ -173,9 +168,6 @@ class Event:
 
 @dataclass(frozen=True)
 class SolutionEntry:
-    """
-    Итог назначения одного события на конкретный слот/преподавателя/аудиторию.
-    """
     event_id: int
     slot_id: int
     teacher_id: int
@@ -184,9 +176,17 @@ class SolutionEntry:
 
 @dataclass
 class Solution:
-    """
-    Результат solver.
-    """
     entries: List[SolutionEntry] = field(default_factory=list)
     objective_value: int = 0
     meta: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ScheduleMetrics:
+    total_penalty: int
+    student_gaps: int
+    teacher_gaps: int
+    student_overloads: int
+    teacher_overloads: int
+    method_day_violations: int
+    lecture_late_penalty: int

@@ -6,23 +6,16 @@ from PyQt6.QtWidgets import (
 )
 
 from app.presentation.pages.curriculum_page import CurriculumPage
+from app.presentation.pages.drafts_page import DraftsPage
 from app.presentation.pages.editor_page import EditorPage
 from app.presentation.pages.generate_page import GeneratePage
 from app.presentation.pages.groups_page import GroupsPage
 from app.presentation.pages.rooms_page import RoomsPage
 from app.presentation.pages.teachers_page import TeachersPage
-from app.presentation.pages.variants_page import VariantsPage
 from app.presentation.viewmodels.editor_vm import EditorViewModel
 
 
 class MainWindow(QMainWindow):
-    """
-    Главное окно приложения.
-
-    Здесь создаются только актуальные страницы и передаются уже
-    конкретные зависимости из container, а не сам container целиком.
-    """
-
     def __init__(self, container):
         super().__init__()
         self.container = container
@@ -32,6 +25,7 @@ class MainWindow(QMainWindow):
             int(self.container.config.window_width),
             int(self.container.config.window_height),
         )
+        self.setMinimumSize(1100, 700)
 
         self._init_ui()
 
@@ -39,15 +33,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        # -----------------------------------------------------
         # Pages
-        # -----------------------------------------------------
-        self.teachers_page = TeachersPage(
-            teachers_repo=self.container.teachers_repo,
-            subjects_repo=self.container.subjects_repo,
-            calendar_repo=self.container.calendar_repo,
-        )
-
         self.groups_page = GroupsPage(
             groups_repo=self.container.groups_repo,
         )
@@ -63,14 +49,29 @@ class MainWindow(QMainWindow):
             calendar_repo=self.container.calendar_repo,
         )
 
+        self.teachers_page = TeachersPage(
+            teachers_repo=self.container.teachers_repo,
+            subjects_repo=self.container.subjects_repo,
+            calendar_repo=self.container.calendar_repo,
+        )
+
+        self.drafts_page = DraftsPage(
+            schedule_repo=self.container.schedule_repo,
+            calendar_repo=self.container.calendar_repo,
+            event_builder=self.container.event_builder,
+            config=self.container.config,
+            groups_repo=self.container.groups_repo,
+            subjects_repo=self.container.subjects_repo,
+            rooms_repo=self.container.rooms_repo,
+            teachers_repo=self.container.teachers_repo,
+        )
+
         self.generate_page = GeneratePage(
             calendar_repo=self.container.calendar_repo,
             schedule_repo=self.container.schedule_repo,
-        )
-
-        self.variants_page = VariantsPage(
-            schedule_repo=self.container.schedule_repo,
-            calendar_repo=self.container.calendar_repo,
+            event_builder=self.container.event_builder,
+            config=self.container.config,
+            rules=self.container.rule_profiles.get("balanced"),
         )
 
         self.editor_vm = EditorViewModel(
@@ -79,24 +80,29 @@ class MainWindow(QMainWindow):
         )
         self.editor_page = EditorPage(
             vm=self.editor_vm,
+            calendar_repo=self.container.calendar_repo,
+        )
+        self.editor_page.configure_creation_support(
+            event_builder=self.container.event_builder,
+            config=self.container.config,
+            groups_repo=self.container.groups_repo,
+            subjects_repo=self.container.subjects_repo,
+            rooms_repo=self.container.rooms_repo,
+            teachers_repo=self.container.teachers_repo,
         )
 
-        # -----------------------------------------------------
         # Tabs
-        # -----------------------------------------------------
-        self.tabs.addTab(self.teachers_page, "Преподаватели")
         self.tabs.addTab(self.groups_page, "Группы")
         self.tabs.addTab(self.rooms_page, "Аудитории")
         self.tabs.addTab(self.curriculum_page, "Учебный план")
+        self.tabs.addTab(self.teachers_page, "Преподаватели")
+        self.tabs.addTab(self.drafts_page, "Черновики")
         self.tabs.addTab(self.generate_page, "Генерация")
-        self.tabs.addTab(self.variants_page, "Варианты")
         self.tabs.addTab(self.editor_page, "Расписание")
 
-        # -----------------------------------------------------
         # Cross-page wiring
-        # -----------------------------------------------------
-        self.variants_page.variantOpenRequested.connect(self._open_variant_in_editor)
+        self.generate_page.variantOpenRequested.connect(self._open_variant_in_editor)
 
     def _open_variant_in_editor(self, variant_id: int) -> None:
-        self.editor_vm.load_variant(int(variant_id))
+        self.editor_page.open_variant(int(variant_id))
         self.tabs.setCurrentWidget(self.editor_page)

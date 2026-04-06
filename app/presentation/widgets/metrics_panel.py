@@ -1,23 +1,3 @@
-"""
-MetricsPanel
-
-Панель отображения метрик варианта расписания:
-- objective score
-- количество нарушений (soft)
-- средняя нагрузка студентов
-- средняя нагрузка преподавателей
-- количество окон
-- количество превышений soft-limit
-
-Это чистый UI-компонент.
-Он принимает уже рассчитанные данные (DTO или dict).
-
-Можно использовать:
-- на странице GeneratePage
-- на странице VariantsPage
-- в EditorPage (при выборе варианта)
-"""
-
 from __future__ import annotations
 
 from typing import Optional
@@ -33,10 +13,6 @@ from PyQt6.QtCore import Qt
 
 
 class MetricValue(QLabel):
-    """
-    Немного стилизованный QLabel для числовых метрик.
-    """
-
     def __init__(self, text: str = ""):
         super().__init__(text)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -50,10 +26,6 @@ class MetricValue(QLabel):
 
 
 class MetricLabel(QLabel):
-    """
-    Подпись метрики.
-    """
-
     def __init__(self, text: str):
         super().__init__(text)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -66,12 +38,10 @@ class MetricLabel(QLabel):
 
 
 class MetricsPanel(QWidget):
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
 
-    # ---------------------------------------------------------
 
     def _init_ui(self):
         layout = QVBoxLayout()
@@ -108,10 +78,10 @@ class MetricsPanel(QWidget):
 
         self.setLayout(layout)
 
-    # ---------------------------------------------------------
 
     def set_metrics(
         self,
+        metrics: Optional[dict] = None,
         score: Optional[int] = None,
         soft_violations: Optional[int] = None,
         avg_students_load: Optional[float] = None,
@@ -119,9 +89,46 @@ class MetricsPanel(QWidget):
         total_gaps: Optional[int] = None,
         soft_overloads: Optional[int] = None,
     ):
-        """
-        Обновляет значения метрик.
-        """
+
+        data = dict(metrics or {})
+
+        if score is None:
+            score = data.get("score")
+        if score is None:
+            score = data.get("objective_score")
+        if score is None:
+            score = data.get("best_objective_score")
+
+        if soft_violations is None:
+            soft_violations = data.get("soft_violations")
+        if soft_violations is None:
+            soft_violations = data.get("entries_count")
+        if soft_violations is None:
+            soft_violations = data.get("variants_count")
+
+        if avg_students_load is None:
+            avg_students_load = data.get("avg_students_load")
+        if avg_students_load is None:
+            avg_students_load = data.get("groups_count")
+        if avg_students_load is None:
+            avg_students_load = data.get("best_entries_count")
+
+        if avg_teachers_load is None:
+            avg_teachers_load = data.get("avg_teachers_load")
+        if avg_teachers_load is None:
+            avg_teachers_load = data.get("teachers_count")
+        if avg_teachers_load is None:
+            avg_teachers_load = data.get("best_variant_id")
+
+        if total_gaps is None:
+            total_gaps = data.get("total_gaps")
+        if total_gaps is None:
+            total_gaps = data.get("rooms_count")
+
+        if soft_overloads is None:
+            soft_overloads = data.get("soft_overloads")
+        if soft_overloads is None:
+            soft_overloads = data.get("locked_entries")
 
         self.score_value.setText(str(score) if score is not None else "-")
         self.violations_value.setText(str(soft_violations) if soft_violations is not None else "-")

@@ -230,6 +230,33 @@ class SqliteTeachersRepository:
             needs_method_day=bool(row.get("needs_method_day", 1)),
         )
 
+    def get_by_full_name(self, full_name: str) -> Optional[Teacher]:
+        normalized_name = str(full_name or "").strip()
+        if not normalized_name:
+            return None
+
+        with self._session_factory() as conn:
+            conn.row_factory = _row_to_dict
+            row = conn.execute(
+                """
+                SELECT *
+                FROM Teachers
+                WHERE LOWER(TRIM(full_name)) = LOWER(?)
+                """,
+                (normalized_name,),
+            ).fetchone()
+
+        if not row:
+            return None
+
+        return Teacher(
+            id_teacher=int(row["id_teacher"]),
+            full_name=str(row["full_name"]),
+            hard_max_pairs_per_day=_positive_int(row.get("max_pairs_per_day_hard", 6), 6),
+            soft_max_pairs_per_day=_positive_int(row.get("max_pairs_per_day_soft", 4), 4),
+            needs_method_day=bool(row.get("needs_method_day", 1)),
+        )
+
     def get_teacher_subject_ids(self, teacher_id: int) -> list[int]:
         with self._session_factory() as conn:
             rows = conn.execute(
@@ -1573,6 +1600,140 @@ class SqliteScheduleRepository:
     def get_generation_event(self, event_id: int):
         return self._generation_events.get(int(event_id))
 
+    def create_generation_draft(self, calendar_id: int, name: str, comment: str | None = None) -> int:
+        with self._session_factory() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO GenerationDrafts(calendar_id, name, comment)
+                VALUES (?, ?, ?)
+                """,
+                (int(calendar_id), str(name), comment),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def delete_generation_draft(self, draft_id: int) -> None:
+        with self._session_factory() as conn:
+            conn.execute("DELETE FROM GenerationDrafts WHERE id_draft=?", (int(draft_id),))
+            conn.commit()
+
+    def list_generation_drafts(self, calendar_id: Optional[int] = None):
+        with self._session_factory() as conn:
+            conn.row_factory = _row_to_dict
+            if calendar_id is None:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM GenerationDrafts
+                    ORDER BY id_draft DESC
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM GenerationDrafts
+                    WHERE calendar_id=?
+                    ORDER BY id_draft DESC
+                    """,
+                    (int(calendar_id),),
+                ).fetchall()
+        return [SimpleNamespace(**r) for r in rows]
+
+    def list_generation_draft_entries(self, draft_id: int):
+        with self._session_factory() as conn:
+            conn.row_factory = _row_to_dict
+            rows = conn.execute(
+                """
+                SELECT
+                    gde.id_draft_entry,
+                    gde.draft_id,
+                    gde.event_id,
+                    gde.slot_id,
+                    gde.teacher_id,
+                    gde.room_id,
+                    gde.comment,
+                    ts.day_of_week,
+                    ts.pair_number,
+                    sw.week_type,
+                    sw.week_number_in_semester,
+                    t.full_name AS teacher_name,
+                    c.room_number
+                FROM GenerationDraftEntries gde
+                JOIN TimeSlots ts ON ts.id_slot = gde.slot_id
+                JOIN SemesterWeeks sw ON sw.id_week = ts.week_id
+                LEFT JOIN Teachers t ON t.id_teacher = gde.teacher_id
+                LEFT JOIN Classes c ON c.id_class = gde.room_id
+                WHERE gde.draft_id=?
+                ORDER BY sw.week_type, ts.day_of_week, ts.pair_number, gde.id_draft_entry
+                """,
+                (int(draft_id),),
+            ).fetchall()
+        return [SimpleNamespace(**r) for r in rows]
+
+    def upsert_generation_draft_entry(
+        self,
+        draft_id: int,
+        event_id: int,
+        slot_id: int,
+        teacher_id: int | None = None,
+        room_id: int | None = None,
+        comment: str | None = None,
+    ) -> int:
+        with self._session_factory() as conn:
+            row = conn.execute(
+                """
+                SELECT id_draft_entry
+                FROM GenerationDraftEntries
+                WHERE draft_id=? AND event_id=?
+                """,
+                (int(draft_id), int(event_id)),
+            ).fetchone()
+
+            if row:
+                draft_entry_id = int(row[0])
+                conn.execute(
+                    """
+                    UPDATE GenerationDraftEntries
+                    SET slot_id=?, teacher_id=?, room_id=?, comment=?
+                    WHERE id_draft_entry=?
+                    """,
+                    (
+                        int(slot_id),
+                        int(teacher_id) if teacher_id is not None else None,
+                        int(room_id) if room_id is not None else None,
+                        comment,
+                        int(draft_entry_id),
+                    ),
+                )
+                conn.commit()
+                return draft_entry_id
+
+            cur = conn.execute(
+                """
+                INSERT INTO GenerationDraftEntries(draft_id, event_id, slot_id, teacher_id, room_id, comment)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(draft_id),
+                    int(event_id),
+                    int(slot_id),
+                    int(teacher_id) if teacher_id is not None else None,
+                    int(room_id) if room_id is not None else None,
+                    comment,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def delete_generation_draft_entry(self, draft_entry_id: int) -> None:
+        with self._session_factory() as conn:
+            conn.execute(
+                "DELETE FROM GenerationDraftEntries WHERE id_draft_entry=?",
+                (int(draft_entry_id),),
+            )
+            conn.commit()
+
     def create_variant(
         self,
         calendar_id: int,
@@ -1699,35 +1860,46 @@ class SqliteScheduleRepository:
                         f"Перед save_solution_entries нужно вызвать set_generation_events(...)."
                     )
 
-                curriculum_id = _positive_int(getattr(event, "curriculum_id", 0), 0)
-                group_id = _positive_int(getattr(event, "group_id", 0), 0)
-
-                conn.execute(
-                    """
-                    INSERT INTO ScheduleEntries(
-                        variant_id,
-                        event_id,
-                        slot_id,
-                        group_id,
-                        teacher_id,
-                        curriculum_id,
-                        room_id,
-                        is_locked,
-                        comment
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
-                    """,
+                group_curriculum_pairs = [
                     (
-                        int(variant_id),
-                        int(entry.event_id),
-                        int(entry.slot_id),
-                        int(group_id) if group_id > 0 else None,
-                        int(entry.teacher_id),
-                        int(curriculum_id),
-                        int(entry.room_id),
-                        json.dumps({"event_id": int(entry.event_id)}, ensure_ascii=False),
-                    ),
-                )
+                        _positive_int(group_id, 0),
+                        _positive_int(curriculum_id, 0),
+                    )
+                    for group_id, curriculum_id in list(getattr(event, "group_curriculum_pairs", []) or [])
+                    if _positive_int(group_id, 0) > 0 and _positive_int(curriculum_id, 0) > 0
+                ]
+                if not group_curriculum_pairs:
+                    curriculum_id = _positive_int(getattr(event, "curriculum_id", 0), 0)
+                    group_id = _positive_int(getattr(event, "group_id", 0), 0)
+                    group_curriculum_pairs = [(group_id, curriculum_id)]
+
+                for group_id, curriculum_id in group_curriculum_pairs:
+                    conn.execute(
+                        """
+                        INSERT INTO ScheduleEntries(
+                            variant_id,
+                            event_id,
+                            slot_id,
+                            group_id,
+                            teacher_id,
+                            curriculum_id,
+                            room_id,
+                            is_locked,
+                            comment
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+                        """,
+                        (
+                            int(variant_id),
+                            int(entry.event_id),
+                            int(entry.slot_id),
+                            int(group_id) if int(group_id) > 0 else None,
+                            int(entry.teacher_id),
+                            int(curriculum_id),
+                            int(entry.room_id),
+                            json.dumps({"event_id": int(entry.event_id)}, ensure_ascii=False),
+                        ),
+                    )
             conn.commit()
 
     def _entry_query(self) -> str:
@@ -1858,33 +2030,64 @@ class SqliteScheduleRepository:
         group_id: int,
         slot_id: int,
         exclude_entry_id: Optional[int] = None,
+        allow_same_event_id: Optional[int] = None,
     ) -> bool:
         with self._session_factory() as conn:
             if exclude_entry_id is None:
-                row = conn.execute(
-                    """
-                    SELECT 1
-                    FROM ScheduleEntries
-                    WHERE variant_id=? AND group_id=? AND slot_id=?
-                    LIMIT 1
-                    """,
-                    (int(variant_id), int(group_id), int(slot_id)),
-                ).fetchone()
+                if allow_same_event_id is None:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND group_id=? AND slot_id=?
+                        LIMIT 1
+                        """,
+                        (int(variant_id), int(group_id), int(slot_id)),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND group_id=? AND slot_id=?
+                          AND COALESCE(event_id, 0)<>?
+                        LIMIT 1
+                        """,
+                        (int(variant_id), int(group_id), int(slot_id), int(allow_same_event_id)),
+                    ).fetchone()
             else:
-                row = conn.execute(
-                    """
-                    SELECT 1
-                    FROM ScheduleEntries
-                    WHERE variant_id=? AND group_id=? AND slot_id=? AND id_schedule<>?
-                    LIMIT 1
-                    """,
-                    (
-                        int(variant_id),
-                        int(group_id),
-                        int(slot_id),
-                        int(exclude_entry_id),
-                    ),
-                ).fetchone()
+                if allow_same_event_id is None:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND group_id=? AND slot_id=? AND id_schedule<>?
+                        LIMIT 1
+                        """,
+                        (
+                            int(variant_id),
+                            int(group_id),
+                            int(slot_id),
+                            int(exclude_entry_id),
+                        ),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND group_id=? AND slot_id=? AND id_schedule<>?
+                          AND COALESCE(event_id, 0)<>?
+                        LIMIT 1
+                        """,
+                        (
+                            int(variant_id),
+                            int(group_id),
+                            int(slot_id),
+                            int(exclude_entry_id),
+                            int(allow_same_event_id),
+                        ),
+                    ).fetchone()
         return row is not None
 
     def exists_teacher_conflict(
@@ -1893,33 +2096,64 @@ class SqliteScheduleRepository:
         teacher_id: int,
         slot_id: int,
         exclude_entry_id: Optional[int] = None,
+        allow_same_event_id: Optional[int] = None,
     ) -> bool:
         with self._session_factory() as conn:
             if exclude_entry_id is None:
-                row = conn.execute(
-                    """
-                    SELECT 1
-                    FROM ScheduleEntries
-                    WHERE variant_id=? AND teacher_id=? AND slot_id=?
-                    LIMIT 1
-                    """,
-                    (int(variant_id), int(teacher_id), int(slot_id)),
-                ).fetchone()
+                if allow_same_event_id is None:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND teacher_id=? AND slot_id=?
+                        LIMIT 1
+                        """,
+                        (int(variant_id), int(teacher_id), int(slot_id)),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND teacher_id=? AND slot_id=?
+                          AND COALESCE(event_id, 0)<>?
+                        LIMIT 1
+                        """,
+                        (int(variant_id), int(teacher_id), int(slot_id), int(allow_same_event_id)),
+                    ).fetchone()
             else:
-                row = conn.execute(
-                    """
-                    SELECT 1
-                    FROM ScheduleEntries
-                    WHERE variant_id=? AND teacher_id=? AND slot_id=? AND id_schedule<>?
-                    LIMIT 1
-                    """,
-                    (
-                        int(variant_id),
-                        int(teacher_id),
-                        int(slot_id),
-                        int(exclude_entry_id),
-                    ),
-                ).fetchone()
+                if allow_same_event_id is None:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND teacher_id=? AND slot_id=? AND id_schedule<>?
+                        LIMIT 1
+                        """,
+                        (
+                            int(variant_id),
+                            int(teacher_id),
+                            int(slot_id),
+                            int(exclude_entry_id),
+                        ),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND teacher_id=? AND slot_id=? AND id_schedule<>?
+                          AND COALESCE(event_id, 0)<>?
+                        LIMIT 1
+                        """,
+                        (
+                            int(variant_id),
+                            int(teacher_id),
+                            int(slot_id),
+                            int(exclude_entry_id),
+                            int(allow_same_event_id),
+                        ),
+                    ).fetchone()
         return row is not None
 
     def exists_room_conflict(
@@ -1928,33 +2162,64 @@ class SqliteScheduleRepository:
         room_id: int,
         slot_id: int,
         exclude_entry_id: Optional[int] = None,
+        allow_same_event_id: Optional[int] = None,
     ) -> bool:
         with self._session_factory() as conn:
             if exclude_entry_id is None:
-                row = conn.execute(
-                    """
-                    SELECT 1
-                    FROM ScheduleEntries
-                    WHERE variant_id=? AND room_id=? AND slot_id=?
-                    LIMIT 1
-                    """,
-                    (int(variant_id), int(room_id), int(slot_id)),
-                ).fetchone()
+                if allow_same_event_id is None:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND room_id=? AND slot_id=?
+                        LIMIT 1
+                        """,
+                        (int(variant_id), int(room_id), int(slot_id)),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND room_id=? AND slot_id=?
+                          AND COALESCE(event_id, 0)<>?
+                        LIMIT 1
+                        """,
+                        (int(variant_id), int(room_id), int(slot_id), int(allow_same_event_id)),
+                    ).fetchone()
             else:
-                row = conn.execute(
-                    """
-                    SELECT 1
-                    FROM ScheduleEntries
-                    WHERE variant_id=? AND room_id=? AND slot_id=? AND id_schedule<>?
-                    LIMIT 1
-                    """,
-                    (
-                        int(variant_id),
-                        int(room_id),
-                        int(slot_id),
-                        int(exclude_entry_id),
-                    ),
-                ).fetchone()
+                if allow_same_event_id is None:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND room_id=? AND slot_id=? AND id_schedule<>?
+                        LIMIT 1
+                        """,
+                        (
+                            int(variant_id),
+                            int(room_id),
+                            int(slot_id),
+                            int(exclude_entry_id),
+                        ),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT 1
+                        FROM ScheduleEntries
+                        WHERE variant_id=? AND room_id=? AND slot_id=? AND id_schedule<>?
+                          AND COALESCE(event_id, 0)<>?
+                        LIMIT 1
+                        """,
+                        (
+                            int(variant_id),
+                            int(room_id),
+                            int(slot_id),
+                            int(exclude_entry_id),
+                            int(allow_same_event_id),
+                        ),
+                    ).fetchone()
         return row is not None
 
     def update_entry(self, entry: ScheduleEntryDTO) -> None:
@@ -1986,6 +2251,38 @@ class SqliteScheduleRepository:
                 ),
             )
             conn.commit()
+
+    def create_entry(self, entry: ScheduleEntryDTO) -> int:
+        with self._session_factory() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO ScheduleEntries(
+                    variant_id,
+                    event_id,
+                    slot_id,
+                    group_id,
+                    teacher_id,
+                    curriculum_id,
+                    room_id,
+                    is_locked,
+                    comment
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(entry.variant_id),
+                    int(entry.event_id),
+                    int(entry.slot_id),
+                    int(entry.group_id) if int(entry.group_id) > 0 else None,
+                    int(entry.teacher_id),
+                    int(entry.curriculum_id),
+                    int(entry.room_id),
+                    _bool_to_int(entry.is_locked),
+                    json.dumps({"event_id": int(entry.event_id)}, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
 
     def lock_entry(self, variant_id: int, schedule_entry_id: int, comment: str | None = None) -> None:
         with self._session_factory() as conn:

@@ -7,10 +7,6 @@
   * сравнивать варианты
   * пересчитывать score после ручных правок (без перезапуска solver)
 
-Важно:
-- Здесь нет OR-Tools
-- Здесь нет БД/Qt
-- На вход подаём "плоские" записи (SolutionEntry или DTO) + справочники слотов
 """
 
 from __future__ import annotations
@@ -22,10 +18,6 @@ from collections import defaultdict
 from app.domain.models import TimeSlot, ScheduleMetrics
 from app.domain.rules import SchedulingRules
 
-
-# -----------------------------
-# Helpers
-# -----------------------------
 
 def day_key(slot: TimeSlot) -> Tuple[int, int, int]:
     """(week_number_in_semester, week_type, day_of_week)"""
@@ -39,11 +31,6 @@ def _count_gaps(
     lunch_min: int,
     lunch_max: int,
 ) -> int:
-    """
-    occupied_pairs: {pair_number,...} в рамках одного дня.
-    Окна = количество пустых пар между первой и последней занятой парой.
-    Обеденный разрыв (если разрешён) не считаем как окно.
-    """
     if not occupied_pairs:
         return 0
 
@@ -61,22 +48,12 @@ def _count_gaps(
 
 
 def _student_day_load_penalty(load: int, rules: SchedulingRules) -> int:
-    """
-    Возвращает "units" штрафа (без веса): насколько вышли за границы 2..5.
-    """
     under = max(0, rules.min_pairs_students_per_day - load)
     over = max(0, load - rules.max_pairs_students_per_day)
     return under + over
 
 
 def _teacher_over_soft_units(load: int, soft_max: int) -> int:
-    """
-    Возвращает "units" штрафа (без веса) за нагрузку преподавателя.
-    Рекомендуемая схема:
-      <= soft_max: 0
-      soft_max+1 (обычно 5): 1
-      soft_max+2 (обычно 6): 3  (сильнее, крайний случай)
-    """
     if load <= soft_max:
         return 0
     if load == soft_max + 1:
@@ -88,20 +65,13 @@ def _teacher_over_soft_units(load: int, soft_max: int) -> int:
 
 
 def _lecture_late_units(pair_number: int, rules: SchedulingRules) -> int:
-    """
-    Units штрафа за лекцию не в начале дня (без веса).
-    """
     return max(0, pair_number - rules.lecture_preferred_last_pair)
 
-
-# -----------------------------
 # Scoring API
-# -----------------------------
 
 @dataclass(frozen=True)
 class ScoreBreakdown:
     """
-    Детальная расшифровка для UI (если нужно).
     total_penalty = сумма всех (weight * units).
     """
     total_penalty: int
@@ -139,7 +109,7 @@ def compute_metrics(
         - slot_id
         - group_id
         - teacher_id
-        - event_id (опционально, но нужен для лекций)
+        - event_id 
     slots_by_id: dict[slot_id] -> TimeSlot
     teacher_soft_max_by_id: если нет — используем rules.teacher_soft_max_pairs
     consider_method_day_by_teacher: если нет — считаем всем, если rules.consider_method_day=True
@@ -195,8 +165,6 @@ def compute_metrics(
     # --- Студенты: окна + нагрузка в день + баланс (L1) ---
     student_gaps_units = 0
     student_day_load_units = 0
-
-    # Нам нужны все группы, присутствующие в расписании
     groups_in_schedule = {gid for (gid, _dk) in group_occ.keys()}
 
     # Баланс считаем как сумма |load - avg|
@@ -212,7 +180,6 @@ def compute_metrics(
             # нагрузка 2..5 (units)
             student_day_load_units += _student_day_load_penalty(load, rules)
 
-            # окна (если запрещены)
             if not rules.allow_student_gaps:
                 student_gaps_units += _count_gaps(
                     occupied_pairs=occ,
@@ -226,7 +193,6 @@ def compute_metrics(
             avg = round(sum(loads) / len(loads))
             student_balance_units_total += sum(abs(l - avg) for l in loads)
 
-    # --- Преподаватели: окна + перегруз > soft_max ---
     teacher_gaps_units = 0
     teacher_over_soft_units = 0
 
@@ -248,7 +214,7 @@ def compute_metrics(
                 lunch_max=rules.lunch_gap_max_pair,
             )
 
-    # --- Методдень: 1 раз в неделю день без занятий (если включено) ---
+    # --- Методдень: 1 раз в неделю день без занятий ---
     method_day_violations_units = 0
     if rules.consider_method_day:
         # Для каждого преподавателя и каждой недели проверим: есть ли хотя бы 1 день без занятий
@@ -267,7 +233,6 @@ def compute_metrics(
                 if not has_free:
                     method_day_violations_units += 1
 
-    # --- Взвешивание ---
     student_gaps_penalty = rules.w_students_gaps * student_gaps_units
     teacher_gaps_penalty = rules.w_teacher_gaps * teacher_gaps_units
     student_day_load_penalty = rules.w_students_day_load * student_day_load_units
@@ -323,14 +288,9 @@ def compute_metrics_from_dto(
     slots_by_id: Dict[int, TimeSlot],
     rules: SchedulingRules,
 ) -> ScheduleMetrics:
-    """
-    Упрощённый помощник: если у тебя в GUI уже ScheduleEntryDTO и тебе нужны только метрики.
-    """
     metrics, _ = compute_metrics(
         entries=entries,
         slots_by_id=slots_by_id,
         rules=rules,
-        # part_type у DTO есть напрямую — но lecture-проверка через event_id map.
-        # Можно расширить, если захочешь учитывать лекции и из DTO.
     )
     return metrics

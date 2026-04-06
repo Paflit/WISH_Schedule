@@ -1,23 +1,3 @@
-"""
-BaseViewModel
-
-Базовый класс для всех ViewModel.
-
-Назначение:
-- централизованная обработка ошибок
-- сигнал обновления UI
-- единый способ выполнения use-cases
-- минимальная "реактивность" через Qt signals
-
-Архитектура:
-Page (QWidget) <-> ViewModel <-> UseCase
-
-ViewModel:
-- не содержит Qt-виджетов
-- может использовать Qt signals
-- не знает про SQLite напрямую
-"""
-
 from __future__ import annotations
 
 from typing import Callable, Any
@@ -28,9 +8,6 @@ from app.domain.exceptions import DomainError
 
 
 class BaseViewModel(QObject):
-    """
-    Базовый ViewModel.
-    """
 
     # Сигналы
     loading_changed = pyqtSignal(bool)
@@ -42,8 +19,6 @@ class BaseViewModel(QObject):
         self.container = container
         self._is_loading = False
 
-    # ---------------------------------------------------------
-
     @property
     def is_loading(self) -> bool:
         return self._is_loading
@@ -53,12 +28,9 @@ class BaseViewModel(QObject):
             self._is_loading = value
             self.loading_changed.emit(value)
 
-    # ---------------------------------------------------------
-
     def execute(self, func: Callable[[], Any]) -> Any:
         """
-        Унифицированный вызов use-case или любой логики
-        с автоматической обработкой ошибок.
+        Унифицированный вызов use-case или любой логики с автоматической обработкой ошибок.
         """
 
         try:
@@ -77,8 +49,6 @@ class BaseViewModel(QObject):
             self._set_loading(False)
 
         return None
-
-    # ---------------------------------------------------------
 
     def notify_info(self, message: str):
         self.info_message.emit(message)

@@ -1,23 +1,9 @@
-"""
-Use-case: сохранение/обновление метаданных варианта расписания.
-
-Зачем нужен отдельный use-case:
-- GUI может переименовать вариант, изменить статус ("approved"/"archived")
-- можно сохранить комментарий или итоговую оценку после ручных правок
-- use-case гарантирует корректный переход статусов и базовую валидацию
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
 from app.domain.exceptions import ValidationError
-
-
-# ------------------------------------------------------------
-# Команда сохранения
-# ------------------------------------------------------------
 
 @dataclass(frozen=True)
 class SaveVariantCommand:
@@ -29,11 +15,6 @@ class SaveVariantCommand:
 
     # если после ручных правок пересчитали score — можно обновить
     objective_score: Optional[int] = None
-
-
-# ------------------------------------------------------------
-# Use-case
-# ------------------------------------------------------------
 
 class SaveVariantUseCase:
     ALLOWED_STATUSES = {"generated", "edited", "approved", "archived"}
@@ -49,11 +30,6 @@ class SaveVariantUseCase:
         if command.status is not None and command.status not in self.ALLOWED_STATUSES:
             raise ValidationError(f"Недопустимый статус: {command.status}")
 
-        # Пример правил переходов статусов (можешь расширить):
-        # generated -> edited/approved/archived
-        # edited    -> approved/archived
-        # approved  -> archived
-        # archived  -> (нельзя менять)
         if variant.status == "archived":
             raise ValidationError("Архивный вариант нельзя изменять.")
 

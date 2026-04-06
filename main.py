@@ -7,16 +7,6 @@ from app.presentation.qt_app import run
 
 
 def main() -> int:
-    """
-    Финальная точка входа приложения.
-
-    Здесь остаются только:
-    - создание контейнера зависимостей;
-    - запуск UI.
-
-    Никакой автоматической правки БД / календаря / weekly plan на старте
-    здесь больше не выполняется.
-    """
     container = build_container()
     return int(run(container))
 

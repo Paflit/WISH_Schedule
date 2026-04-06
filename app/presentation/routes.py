@@ -1,15 +1,3 @@
-"""
-Routes / Navigation registry.
-
-Назначение:
-- Централизованное хранение "идентификаторов экранов"
-- Упрощает навигацию между вкладками и будущими окнами
-- Не содержит логики — только константы и helper
-
-В текущем MVP используется QTabWidget,
-но если позже перейдём на stacked navigation —
-этот файл уже готов.
-"""
 
 from enum import Enum
 
@@ -22,10 +10,6 @@ class Route(str, Enum):
 
 
 class Router:
-    """
-    Простая обёртка над QTabWidget.
-    """
-
     def __init__(self, tab_widget):
         self._tabs = tab_widget
 

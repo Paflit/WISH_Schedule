@@ -124,6 +124,7 @@ def build_container(config: AppConfig | None = None) -> Container:
         groups_repo=groups_repo,
         rooms_repo=rooms_repo,
         calendar_repo=calendar_repo,
+        rules=rule_profiles.get("balanced"),
     )
 
     generate_schedule_uc = GenerateScheduleUseCase(

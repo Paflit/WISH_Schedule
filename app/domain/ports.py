@@ -35,11 +35,6 @@ class TeachersRepositoryPort(Protocol):
         """
         ...
 
-
-# ============================================================
-# Groups / Subjects / Rooms
-# ============================================================
-
 class GroupsRepositoryPort(Protocol):
     def list_all(self) -> List[StudentGroup]:
         ...
@@ -55,10 +50,6 @@ class RoomsRepositoryPort(Protocol):
         ...
 
 
-# ============================================================
-# Calendar
-# ============================================================
-
 class CalendarRepositoryPort(Protocol):
     def list_all(self) -> List[AcademicCalendar]:
         ...
@@ -69,10 +60,6 @@ class CalendarRepositoryPort(Protocol):
     def list_time_slots(self, calendar_id: int) -> List[TimeSlot]:
         ...
 
-
-# ============================================================
-# Curriculum
-# ============================================================
 
 class CurriculumRepositoryPort(Protocol):
     def list_curriculum_items(self, calendar_id: int) -> List[CurriculumItem]:
@@ -116,11 +103,6 @@ class CurriculumRepositoryPort(Protocol):
         """
         ...
 
-
-# ============================================================
-# Schedule variants
-# ============================================================
-
 class ScheduleRepositoryPort(Protocol):
     def create_variant(
         self,
@@ -145,10 +127,6 @@ class ScheduleRepositoryPort(Protocol):
         ...
 
 
-# ============================================================
-# Event builder
-# ============================================================
-
 class EventBuilderPort(Protocol):
     def build_events(
         self,
@@ -158,22 +136,12 @@ class EventBuilderPort(Protocol):
     ) -> List[Event]:
         ...
 
-
-# ============================================================
-# Rule profiles
-# ============================================================
-
 class RuleProfilesPort(Protocol):
     def get(self, key: str):
         ...
 
     def list_keys(self) -> List[str]:
         ...
-
-
-# ============================================================
-# Solver
-# ============================================================
 
 class ScheduleSolverPort(Protocol):
     def solve(

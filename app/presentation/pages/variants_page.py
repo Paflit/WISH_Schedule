@@ -47,9 +47,6 @@ PART_TYPE_LABELS = {
 
 
 class CreateCalendarDialog(QDialog):
-    """
-    Диалог создания нового семестра / календаря.
-    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -117,20 +114,6 @@ class CreateCalendarDialog(QDialog):
 
 
 class VariantsPage(QWidget):
-    """
-    Страница вариантов расписания.
-
-    Показывает:
-    - список вариантов из ScheduleVariants;
-    - метрики выбранного варианта;
-    - краткую сводку по записям;
-    - возможность открыть вариант в редакторе / другом экране.
-
-    Важно:
-    - источник истины — schedule_repo;
-    - открытие варианта наружу идёт через сигнал variantOpenRequested;
-    - рядом с выбором календаря можно создать новый семестр.
-    """
 
     variantOpenRequested = pyqtSignal(int)
 
@@ -226,9 +209,6 @@ class VariantsPage(QWidget):
         self._load_calendars()
         self.refresh()
 
-    # ---------------------------------------------------------
-    # Helpers
-    # ---------------------------------------------------------
     def _set_status(self, text: str, error: bool = False) -> None:
         self.status_label.setText(text)
         self.status_label.setStyleSheet(
@@ -330,9 +310,6 @@ class VariantsPage(QWidget):
         except (TypeError, ValueError):
             return None
 
-    # ---------------------------------------------------------
-    # Public refresh
-    # ---------------------------------------------------------
     def refresh(self) -> None:
         self._current_variant_id = None
         self._current_variant_dto = None
@@ -374,9 +351,6 @@ class VariantsPage(QWidget):
             self.variants_table.selectRow(0)
             self._variant_selection_changed()
 
-    # ---------------------------------------------------------
-    # Variant details
-    # ---------------------------------------------------------
     def _variant_selection_changed(self) -> None:
         variant_id = self._selected_variant_id()
         if variant_id is None:
@@ -480,9 +454,6 @@ class VariantsPage(QWidget):
 
         return rows
 
-    # ---------------------------------------------------------
-    # Open action
-    # ---------------------------------------------------------
     def _open_current_variant(self) -> None:
         if self._current_variant_id is None:
             QMessageBox.information(self, "Не выбрано", "Сначала выберите вариант.")

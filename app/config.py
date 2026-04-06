@@ -1,18 +1,7 @@
-"""
-Глобальная конфигурация приложения.
-
-Задачи:
-- хранить путь к БД
-- хранить общие параметры генерации (лимит времени, число вариантов)
-- хранить базовые параметры модели (часы в паре и т.д.)
-- поддерживать загрузку из ENV или .env (при желании)
-
-Конфиг НЕ должен зависеть от инфраструктуры.
-"""
-
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,13 +53,12 @@ class AppConfig:
 
     @staticmethod
     def load() -> "AppConfig":
-        """
-        Загружает конфигурацию:
-        1) Из переменных окружения (если заданы)
-        2) Иначе — значения по умолчанию
-        """
+        if getattr(sys, "frozen", False):
+            default_base_dir = Path(sys.executable).resolve().parent
+        else:
+            default_base_dir = Path.cwd()
 
-        base_dir = Path(os.getenv("APP_BASE_DIR", Path.cwd()))
+        base_dir = Path(os.getenv("APP_BASE_DIR", default_base_dir))
         data_dir = base_dir / "data"
         export_dir = base_dir / "exports"
         import_dir = base_dir / "imports"
@@ -117,9 +105,6 @@ class AppConfig:
     # ---------------------------------------------------
 
     def as_dict(self) -> dict:
-        """
-        Удобно для логирования или передачи в шаблоны.
-        """
         return {
             "db_url": self.db_url,
             "hours_per_pair": self.hours_per_pair,

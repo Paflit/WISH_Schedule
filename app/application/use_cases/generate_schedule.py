@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Optional
 
 from app.application.dto.schedule_dto import GenerationResultDTO, ScheduleVariantDTO
@@ -9,19 +13,44 @@ from app.domain.exceptions import SolverError, ValidationError
 ProgressCallback = Optional[Callable[[str, dict], None]]
 
 
+def setup_generation_logger(variant_id: int) -> logging.Logger:
+    
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    
+    log_file = logs_dir / f"generation_{variant_id}.log"
+    
+    logger = logging.getLogger(f"generation_{variant_id}")
+    logger.setLevel(logging.INFO)
+    
+    # Удаляем существующие handlers
+    logger.handlers.clear()
+    
+    # File handler
+    file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(formatter)
+    
+    logger.addHandler(file_handler)
+    
+    return logger
+
+
 @dataclass(frozen=True)
 class GenerateScheduleCommand:
-    """
-    Единая команда генерации расписания.
-
-    Важно:
-    - Никаких rule_profile_key / random_seed / created_by снаружи.
-    - UseCase сам определяет базовый профиль правил и технические параметры.
-    """
 
     calendar_id: int
     variants_count: int
     time_limit_seconds: int
+    draft_id: Optional[int] = None
+    use_draft_as_locks: bool = False
+    base_variant_id: Optional[int] = None
+    use_base_variant_as_locks: bool = False
 
     def __post_init__(self) -> None:
         if int(self.calendar_id) <= 0:
@@ -30,6 +59,10 @@ class GenerateScheduleCommand:
             raise ValidationError("Количество вариантов должно быть больше 0.")
         if int(self.time_limit_seconds) <= 0:
             raise ValidationError("Лимит времени должен быть больше 0.")
+        if self.draft_id is not None and int(self.draft_id) <= 0:
+            raise ValidationError("draft_id должен быть положительным числом.")
+        if self.base_variant_id is not None and int(self.base_variant_id) <= 0:
+            raise ValidationError("base_variant_id должен быть положительным числом.")
 
 
 class GenerateScheduleUseCase:
@@ -112,11 +145,6 @@ class GenerateScheduleUseCase:
                 "Для выбранного полугодия в учебном плане нет дисциплин с часами."
             )
 
-        if not weekly_plans:
-            raise ValidationError(
-                "Для выбранного полугодия не сформирован недельный учебный план."
-            )
-
         if not curriculum_map:
             raise ValidationError(
                 "Не найдено элементов учебного плана для выбранного полугодия."
@@ -135,6 +163,44 @@ class GenerateScheduleUseCase:
             raise ValidationError(
                 "Для выбранного полугодия отсутствуют временные слоты."
             )
+
+    def _build_base_variant_locks(self, base_variant_id: int) -> list[object]:
+        entries = list(self._schedule_repo.list_entries(int(base_variant_id)) or [])
+        locks: list[object] = []
+        for entry in entries:
+            event_id = self._positive_int(getattr(entry, "event_id", 0), 0)
+            if event_id <= 0:
+                continue
+            locks.append(
+                SimpleNamespace(
+                    event_id=int(event_id),
+                    slot_id=self._positive_int(getattr(entry, "slot_id", 0), 0),
+                    teacher_id=self._positive_int(getattr(entry, "teacher_id", 0), 0),
+                    room_id=self._positive_int(getattr(entry, "room_id", 0), 0),
+                )
+            )
+        return locks
+
+    def _build_draft_locks(self, draft_id: int) -> list[object]:
+        entries = list(self._schedule_repo.list_generation_draft_entries(int(draft_id)) or [])
+        locks: list[object] = []
+        for entry in entries:
+            event_id = self._positive_int(getattr(entry, "event_id", 0), 0)
+            if event_id <= 0:
+                continue
+            locks.append(
+                SimpleNamespace(
+                    event_id=int(event_id),
+                    slot_id=self._positive_int(getattr(entry, "slot_id", 0), 0),
+                    teacher_id=self._positive_int(getattr(entry, "teacher_id", 0), 0)
+                    if getattr(entry, "teacher_id", None) is not None
+                    else None,
+                    room_id=self._positive_int(getattr(entry, "room_id", 0), 0)
+                    if getattr(entry, "room_id", None) is not None
+                    else None,
+                )
+            )
+        return locks
 
     def execute(
         self,
@@ -197,10 +263,25 @@ class GenerateScheduleUseCase:
             ),
         )
 
+        if not weekly_plans:
+            self._emit(
+                progress_cb,
+                "weekly_plans_missing",
+                fallback="semester_plan",
+            )
+
         teachers = self._teachers_repo.list_all()
+        subjects = self._subjects_repo.list_all()
         groups = self._groups_repo.list_all()
         rooms = self._rooms_repo.list_all()
         slots = self._calendar_repo.list_time_slots(calendar_id)
+
+        subject_names_by_id = {
+            int(getattr(subject, "id_subject", 0) or 0): str(
+                getattr(subject, "subject_name", "") or ""
+            )
+            for subject in subjects
+        }
 
         self._emit(
             progress_cb,
@@ -236,7 +317,12 @@ class GenerateScheduleUseCase:
                 f"Не найден базовый профиль правил '{self.BASE_RULE_PROFILE_KEY}'."
             )
 
-        locks = self._schedule_repo.list_locks_for_calendar(calendar_id)
+        locks = list(self._schedule_repo.list_locks_for_calendar(calendar_id) or [])
+        if bool(getattr(command, "use_draft_as_locks", False)) and getattr(command, "draft_id", None):
+            locks.extend(self._build_draft_locks(int(command.draft_id)))
+        if bool(getattr(command, "use_base_variant_as_locks", False)) and getattr(command, "base_variant_id", None):
+            locks.extend(self._build_base_variant_locks(int(command.base_variant_id)))
+
         self._emit(
             progress_cb,
             "rules_loaded",
@@ -310,6 +396,7 @@ class GenerateScheduleUseCase:
                 time_limit_seconds=time_limit_seconds,
                 random_seed=random_seed,
                 locks=locks,
+                subject_names_by_id=subject_names_by_id,
             )
         except ValidationError:
             raise
@@ -359,12 +446,27 @@ class GenerateScheduleUseCase:
                     created_by=self.GENERATED_BY,
                 )
 
+                # Настраиваем логгер для этого варианта
+                logger = setup_generation_logger(int(variant_id))
+                logger.info(f"Начало сохранения варианта #{idx}")
+                logger.info(f"Variant ID: {variant_id}")
+                logger.info(f"Variant name: {variant_name}")
+                logger.info(f"Calendar ID: {calendar_id}")
+                logger.info(f"Objective score: {objective_value}")
+                logger.info(f"Solution entries count: {len(solution_entries)}")
+
                 self._schedule_repo.save_solution_entries(
                     variant_id=int(variant_id),
                     solution_entries=solution_entries,
                 )
 
+                logger.info("Solution entries сохранены")
+
                 variant_dto = self._schedule_repo.get_variant_dto(int(variant_id))
+                
+                logger.info(f"Variant DTO получен, entries: {len(getattr(variant_dto, 'entries', []) or [])}")
+                logger.info("Генерация варианта завершена успешно")
+                
             except Exception as exc:
                 raise SolverError(
                     f"Ошибка при сохранении варианта расписания #{idx}: {exc}"

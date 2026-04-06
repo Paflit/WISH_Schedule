@@ -1,21 +1,3 @@
-"""
-CalendarPage
-
-Экран управления:
-- Академическим календарём
-- Неделями семестра
-- Таймслотами (день, пара, время)
-
-В MVP:
-- Отображаем список календарей
-- Возможность выбрать активный
-- Таблица таймслотов
-- Кнопка "Обновить"
-
-Бизнес-логика не реализуется здесь.
-Страница вызывает controller/use-case через container.
-"""
-
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -39,8 +21,6 @@ class CalendarPage(QWidget):
 
         self._init_ui()
         self._load_calendars()
-
-    # ---------------------------------------------------------
 
     def _init_ui(self):
         layout = QVBoxLayout()
@@ -76,8 +56,6 @@ class CalendarPage(QWidget):
         self.refresh_button.clicked.connect(self._refresh_slots)
         self.calendar_select.currentIndexChanged.connect(self._refresh_slots)
 
-    # ---------------------------------------------------------
-
     def _load_calendars(self):
         try:
             calendars = self.calendar_repo.list_all()
@@ -92,8 +70,6 @@ class CalendarPage(QWidget):
 
         except Exception as e:
             QMessageBox.critical(self, "Ошибка загрузки календарей", str(e))
-
-    # ---------------------------------------------------------
 
     def _refresh_slots(self):
         calendar_id = self.calendar_select.currentData()

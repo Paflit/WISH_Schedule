@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -22,14 +23,6 @@ from PyQt6.QtWidgets import (
 
 
 class GroupEditDialog(QDialog):
-    """
-    Диалог создания / редактирования учебной группы.
-
-    Актуальная модель:
-    - ID не вводится руками;
-    - курс задаётся через dropdown;
-    - количество студентов задаётся числом.
-    """
 
     def __init__(self, parent, group: Optional[object] = None):
         super().__init__(parent)
@@ -38,7 +31,7 @@ class GroupEditDialog(QDialog):
         self.setWindowTitle(
             "Редактирование группы" if group is not None else "Добавление группы"
         )
-        self.resize(420, 200)
+        self.resize(420, 180)
 
         root = QVBoxLayout(self)
 
@@ -48,21 +41,18 @@ class GroupEditDialog(QDialog):
         self.name_combo = QComboBox()
         self.name_combo.setEditable(True)
         self.name_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.name_combo.setPlaceholderText("Введите название группы")
+        self.name_combo.setPlaceholderText("Введите название группы (например, ШАД-111)")
         form.addRow("Название группы:", self.name_combo)
-
-        self.course_combo = QComboBox()
-        self.course_combo.addItem("—", None)
-        for year in range(1, 6):
-            self.course_combo.addItem(str(year), year)
-        form.addRow("Курс:", self.course_combo)
 
         self.quantity_spin = QSpinBox()
         self.quantity_spin.setRange(1, 1000)
         self.quantity_spin.setValue(25)
         form.addRow("Количество студентов:", self.quantity_spin)
 
-        hint = QLabel("ID группы создаётся автоматически базой данных.")
+        hint = QLabel(
+            "Курс определяется автоматически из названия группы.\n"
+            "Например: ШАД-111 → 1 курс, ШАД-411 → 4 курс."
+        )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #667085;")
         root.addWidget(hint)
@@ -83,45 +73,56 @@ class GroupEditDialog(QDialog):
 
         self.name_combo.addItem(str(getattr(self._group, "group_name", "") or ""))
         self.name_combo.setCurrentText(str(getattr(self._group, "group_name", "") or ""))
-
-        year = getattr(self._group, "year", None)
-        idx = self.course_combo.findData(int(year) if year is not None else None)
-        if idx >= 0:
-            self.course_combo.setCurrentIndex(idx)
-
         self.quantity_spin.setValue(int(getattr(self._group, "quantity", 25) or 25))
+
+    @staticmethod
+    def extract_year_from_group_name(group_name: str) -> Optional[int]:
+        if not group_name or "-" not in group_name:
+            return None
+        
+        parts = group_name.split("-", 1)
+        if len(parts) < 2:
+            return None
+        
+        after_dash = parts[1].strip()
+        if not after_dash:
+            return None
+        
+        # Берем первую цифру
+        first_digit = None
+        for char in after_dash:
+            if char.isdigit():
+                first_digit = int(char)
+                break
+        
+        return first_digit
 
     def get_data(self) -> tuple[str, Optional[int], int]:
         group_name = self.name_combo.currentText().strip()
-        year = self.course_combo.currentData()
+        year = self.extract_year_from_group_name(group_name)
         quantity = int(self.quantity_spin.value())
         return group_name, year, quantity
 
 
 class GroupsPage(QWidget):
-    """
-    Страница учебных групп.
-
-    Показывает:
-    - ID
-    - название группы
-    - курс
-    - количество студентов
-
-    Важно:
-    - ID не вводится вручную;
-    - курс задаётся через dropdown;
-    - при сохранении курс реально уходит в БД.
-    """
 
     def __init__(self, groups_repo):
         super().__init__()
         self._groups_repo = groups_repo
+        self._all_rows: list[object] = []
+        self._sort_column: Optional[int] = None
+        self._sort_order: int = 0
 
         root = QVBoxLayout(self)
 
         toolbar = QHBoxLayout()
         root.addLayout(toolbar)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Поиск по таблице...")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMaximumWidth(260)
+        toolbar.addWidget(self.search_edit)
 
         toolbar.addStretch(1)
 
@@ -145,6 +146,7 @@ class GroupsPage(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().sectionClicked.connect(self._toggle_sort)
         self.table.setColumnWidth(0, 70)
         self.table.setColumnWidth(1, 240)
         self.table.setColumnWidth(2, 90)
@@ -159,6 +161,7 @@ class GroupsPage(QWidget):
         self.edit_btn.clicked.connect(self._edit_group)
         self.delete_btn.clicked.connect(self._delete_group)
         self.refresh_btn.clicked.connect(self.refresh)
+        self.search_edit.textChanged.connect(self._apply_filters)
 
         self.refresh()
 
@@ -290,12 +293,66 @@ class GroupsPage(QWidget):
 
     def refresh(self) -> None:
         try:
-            rows = self._groups_repo.list_all()
+            self._all_rows = list(self._groups_repo.list_all())
         except Exception as exc:
             self.table.setRowCount(0)
             self._set_status(f"Не удалось загрузить группы: {exc}", error=True)
             return
 
+        self._apply_filters()
+
+    def _toggle_sort(self, column: int) -> None:
+        if self._sort_column != column:
+            self._sort_column = column
+            self._sort_order = 1
+        elif self._sort_order == 1:
+            self._sort_order = -1
+        else:
+            self._sort_column = None
+            self._sort_order = 0
+
+        self._apply_filters()
+
+    def _apply_filters(self) -> None:
+        rows = list(self._all_rows)
+        query = self.search_edit.text().strip().lower()
+
+        if query:
+            rows = [
+                group for group in rows
+                if query in " ".join(
+                    [
+                        str(getattr(group, "id_group", "") or ""),
+                        str(getattr(group, "group_name", "") or ""),
+                        str(getattr(group, "year", "") or ""),
+                        str(getattr(group, "quantity", "") or ""),
+                    ]
+                ).lower()
+            ]
+
+        if self._sort_column is not None and self._sort_order != 0:
+            key_map = {
+                0: lambda x: int(getattr(x, "id_group", 0) or 0),
+                1: lambda x: str(getattr(x, "group_name", "") or "").lower(),
+                2: lambda x: int(getattr(x, "year", 0) or 0),
+                3: lambda x: int(getattr(x, "quantity", 0) or 0),
+            }
+            rows.sort(key=key_map[self._sort_column], reverse=self._sort_order < 0)
+
+        self._update_header_labels()
+        self._render_rows(rows)
+
+    def _update_header_labels(self) -> None:
+        base_headers = ["ID", "Название группы", "Курс", "Количество"]
+        headers = []
+        for idx, title in enumerate(base_headers):
+            if self._sort_column == idx:
+                headers.append(f"{title} {'▲' if self._sort_order > 0 else '▼' if self._sort_order < 0 else ''}".strip())
+            else:
+                headers.append(title)
+        self.table.setHorizontalHeaderLabels(headers)
+
+    def _render_rows(self, rows: list[object]) -> None:
         self.table.setRowCount(0)
 
         for row_idx, group in enumerate(rows):

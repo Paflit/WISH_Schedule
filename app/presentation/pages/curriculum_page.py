@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -31,10 +32,6 @@ PART_TYPE_LABELS = {
 
 
 class CreateCalendarDialog(QDialog):
-    """
-    Диалог создания нового семестра / календаря.
-    """
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Добавление семестра")
@@ -100,21 +97,7 @@ class CreateCalendarDialog(QDialog):
         }
 
 
-class CurriculumEditDialog(QDialog):
-    """
-    Диалог добавления / редактирования записи учебного плана.
-
-    Логика данных остаётся прежней:
-    - группа
-    - дисциплина
-    - тип занятия
-    - тип аудитории
-    - часы в семестре
-    - часы за год
-    - комментарий
-
-    Но в таблице часть полей не отображается.
-    """
+class CurriculumAddDialog(QDialog):
 
     PART_TYPES = [
         ("Лекция", "lecture"),
@@ -123,11 +106,129 @@ class CurriculumEditDialog(QDialog):
         ("Лабораторная", "lab"),
     ]
 
-    ROOM_TYPES = [
-        ("Лекционная", "lecture"),
-        ("Обычная аудитория", "classroom"),
-        ("Компьютерный класс", "computer"),
-        ("Лаборатория", "lab"),
+    def __init__(self, parent, *, groups_repo, subjects_repo, last_group_id=None):
+        super().__init__(parent)
+        self._groups_repo = groups_repo
+        self._subjects_repo = subjects_repo
+        self._last_group_id = last_group_id
+
+        self.setWindowTitle("Добавление записи учебного плана")
+        self.resize(520, 400)
+
+        root = QVBoxLayout(self)
+
+        form = QFormLayout()
+        root.addLayout(form)
+
+        self.group_combo = QComboBox()
+        form.addRow("Группа:", self.group_combo)
+
+        self.subject_combo = QComboBox()
+        self.subject_combo.setEditable(True)
+        self.subject_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.subject_combo.setPlaceholderText("Введите название дисциплины")
+        form.addRow("Дисциплина:", self.subject_combo)
+
+        form.addRow(QLabel(""))
+        form.addRow(QLabel("Типы занятий:"))
+
+        self.part_type_widgets = {}
+        for label, value in self.PART_TYPES:
+            checkbox = QCheckBox(label)
+            spinbox = QSpinBox()
+            spinbox.setRange(0, 500)
+            spinbox.setValue(36)
+            spinbox.setEnabled(False)
+            
+            checkbox.toggled.connect(lambda checked, sb=spinbox: sb.setEnabled(checked))
+            
+            row_layout = QHBoxLayout()
+            row_layout.addWidget(checkbox)
+            row_layout.addWidget(QLabel("Часы:"))
+            row_layout.addWidget(spinbox)
+            row_layout.addStretch()
+            
+            form.addRow(row_layout)
+            
+            self.part_type_widgets[value] = {
+                "checkbox": checkbox,
+                "spinbox": spinbox,
+            }
+
+        # Чекбокс для деления группы на подгруппы
+        form.addRow(QLabel(""))
+        self.split_subgroups_checkbox = QCheckBox("Делить группу на подгруппы (А и Б)")
+        form.addRow(self.split_subgroups_checkbox)
+
+        hint = QLabel(
+            "Отметьте нужные типы занятий и укажите количество часов для каждого. "
+            "Тип аудитории определяется автоматически по типу занятия.\n\n"
+            "При делении группы на подгруппы будут созданы две записи с половиной студентов в каждой."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #667085;")
+        root.addWidget(hint)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        root.addWidget(self.button_box)
+
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+        self._load_groups()
+        self._load_subjects()
+        
+        # Устанавливаем последнюю выбранную группу
+        if self._last_group_id is not None:
+            idx = self.group_combo.findData(self._last_group_id)
+            if idx >= 0:
+                self.group_combo.setCurrentIndex(idx)
+
+    def _load_groups(self) -> None:
+        self.group_combo.clear()
+        groups = self._groups_repo.list_all()
+        for group in groups:
+            label = f"{group.group_name} ({group.quantity} чел.)"
+            self.group_combo.addItem(label, int(group.id_group))
+
+    def _load_subjects(self) -> None:
+        self.subject_combo.clear()
+        # Добавляем пустой элемент по умолчанию
+        self.subject_combo.addItem("", None)
+        subjects = self._subjects_repo.list_all()
+        for subj in subjects:
+            self.subject_combo.addItem(str(subj.subject_name), int(subj.id_subject))
+
+    def get_data(self) -> dict:
+        selected_types = []
+        
+        for part_type, widgets in self.part_type_widgets.items():
+            if widgets["checkbox"].isChecked():
+                hours = widgets["spinbox"].value()
+                if hours > 0:
+                    selected_types.append({
+                        "part_type": part_type,
+                        "hours_in_semester": hours,
+                    })
+        
+        return {
+            "group_id": self.group_combo.currentData(),
+            "subject_id": self.subject_combo.currentData(),
+            "subject_name": self.subject_combo.currentText().strip(),
+            "selected_types": selected_types,
+            "split_into_subgroups": self.split_subgroups_checkbox.isChecked(),
+        }
+
+
+class CurriculumEditDialog(QDialog):
+
+    PART_TYPES = [
+        ("Лекция", "lecture"),
+        ("Практика", "practice"),
+        ("Компьютерная практика", "computer_practice"),
+        ("Лабораторная", "lab"),
     ]
 
     def __init__(
@@ -136,19 +237,15 @@ class CurriculumEditDialog(QDialog):
         *,
         groups_repo,
         subjects_repo,
-        record: Optional[dict] = None,
+        record: dict,
     ):
         super().__init__(parent)
         self._groups_repo = groups_repo
         self._subjects_repo = subjects_repo
-        self._record = record or {}
+        self._record = record
 
-        self.setWindowTitle(
-            "Редактирование записи учебного плана"
-            if record
-            else "Добавление записи учебного плана"
-        )
-        self.resize(520, 380)
+        self.setWindowTitle("Редактирование записи учебного плана")
+        self.resize(450, 280)
 
         root = QVBoxLayout(self)
 
@@ -168,28 +265,13 @@ class CurriculumEditDialog(QDialog):
             self.part_type_combo.addItem(label, value)
         form.addRow("Тип занятия:", self.part_type_combo)
 
-        self.room_type_combo = QComboBox()
-        for label, value in self.ROOM_TYPES:
-            self.room_type_combo.addItem(label, value)
-        form.addRow("Тип аудитории:", self.room_type_combo)
-
         self.hours_semester_spin = QSpinBox()
-        self.hours_semester_spin.setRange(0, 2000)
+        self.hours_semester_spin.setRange(0, 500)
         self.hours_semester_spin.setValue(36)
         form.addRow("Часы в семестре:", self.hours_semester_spin)
 
-        self.hours_year_spin = QSpinBox()
-        self.hours_year_spin.setRange(0, 4000)
-        self.hours_year_spin.setValue(72)
-        form.addRow("Часы за год:", self.hours_year_spin)
-
-        self.comment_combo = QComboBox()
-        self.comment_combo.setEditable(True)
-        self.comment_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        form.addRow("Комментарий:", self.comment_combo)
-
         hint = QLabel(
-            "В таблице скрыты технические поля: ID, тип аудитории, часы за год и комментарий."
+            "Тип аудитории определяется автоматически по типу занятия."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #667085;")
@@ -202,7 +284,6 @@ class CurriculumEditDialog(QDialog):
 
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
-        self.part_type_combo.currentIndexChanged.connect(self._sync_default_room_type)
 
         self._load_groups()
         self._load_subjects()
@@ -217,36 +298,18 @@ class CurriculumEditDialog(QDialog):
 
     def _load_subjects(self) -> None:
         self.subject_combo.clear()
+        # Добавляем пустой элемент по умолчанию
+        self.subject_combo.addItem("", None)
         subjects = self._subjects_repo.list_all()
         for subj in subjects:
             self.subject_combo.addItem(str(subj.subject_name), int(subj.id_subject))
 
-    def _sync_default_room_type(self) -> None:
-        part_type = self.part_type_combo.currentData()
-        mapping = {
-            "lecture": "lecture",
-            "practice": "classroom",
-            "computer_practice": "computer",
-            "lab": "lab",
-        }
-        room_type = mapping.get(str(part_type), "classroom")
-        idx = self.room_type_combo.findData(room_type)
-        if idx >= 0:
-            self.room_type_combo.setCurrentIndex(idx)
-
     def _fill(self) -> None:
-        if not self._record:
-            self._sync_default_room_type()
-            return
-
         group_id = self._record.get("group_id")
         subject_name = str(self._record.get("subject_name", "") or "")
         subject_id = self._record.get("subject_id")
         part_type = str(self._record.get("part_type", "") or "")
-        room_type = str(self._record.get("required_room_type", "") or "")
         hours_in_semester = int(self._record.get("hours_in_semester", 0) or 0)
-        hours_total_year = int(self._record.get("hours_total_year", 0) or 0)
-        comment = str(self._record.get("comment", "") or "")
 
         idx = self.group_combo.findData(int(group_id) if group_id is not None else None)
         if idx >= 0:
@@ -263,53 +326,36 @@ class CurriculumEditDialog(QDialog):
         if idx >= 0:
             self.part_type_combo.setCurrentIndex(idx)
 
-        idx = self.room_type_combo.findData(room_type)
-        if idx >= 0:
-            self.room_type_combo.setCurrentIndex(idx)
-
         self.hours_semester_spin.setValue(hours_in_semester)
-        self.hours_year_spin.setValue(hours_total_year)
-
-        if comment:
-            self.comment_combo.addItem(comment)
-            self.comment_combo.setCurrentText(comment)
 
     def get_data(self) -> dict:
+        part_type = self.part_type_combo.currentData()
+        
+        # Автоматическое определение типа аудитории
+        room_type_mapping = {
+            "lecture": "lecture",
+            "practice": "classroom",
+            "computer_practice": "computer",
+            "lab": "lab",
+        }
+        
         return {
             "group_id": self.group_combo.currentData(),
             "subject_id": self.subject_combo.currentData(),
             "subject_name": self.subject_combo.currentText().strip(),
-            "part_type": self.part_type_combo.currentData(),
-            "required_room_type": self.room_type_combo.currentData(),
+            "part_type": part_type,
+            "required_room_type": room_type_mapping.get(str(part_type), "classroom"),
             "hours_in_semester": int(self.hours_semester_spin.value()),
-            "hours_total_year": int(self.hours_year_spin.value()),
-            "comment": self.comment_combo.currentText().strip() or None,
         }
 
 
 class CurriculumPage(QWidget):
-    """
-    Страница учебного плана.
 
-    В таблице показываются только:
-    - группа
-    - дисциплина
-    - тип занятия
-    - часы/семестр
-
-    Технические поля:
-    - id_curriculum
-    - required_room_type
-    - hours_total_year
-    - comment
-
-    остаются в логике, но не отображаются в таблице.
-    """
-
-    COL_GROUP = 0
-    COL_SUBJECT = 1
-    COL_PART_TYPE = 2
-    COL_HOURS_SEMESTER = 3
+    COL_ID = 0
+    COL_GROUP = 1
+    COL_SUBJECT = 2
+    COL_PART_TYPE = 3
+    COL_HOURS_SEMESTER = 4
 
     def __init__(self, curriculum_repo, groups_repo, subjects_repo, calendar_repo):
         super().__init__()
@@ -319,6 +365,10 @@ class CurriculumPage(QWidget):
         self._calendar_repo = calendar_repo
 
         self._current_calendar_id: Optional[int] = None
+        self._last_selected_group_id: Optional[int] = None  # Запоминаем последнюю группу
+        self._all_rows: list[dict] = []
+        self._sort_column: Optional[int] = None
+        self._sort_order: int = 0
 
         root = QVBoxLayout(self)
 
@@ -335,6 +385,12 @@ class CurriculumPage(QWidget):
         self.add_calendar_btn.setToolTip("Добавить семестр")
         toolbar.addWidget(self.add_calendar_btn)
 
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Поиск по таблице...")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMaximumWidth(260)
+        toolbar.addWidget(self.search_edit)
+
         toolbar.addStretch(1)
 
         self.add_btn = QPushButton("Добавить")
@@ -347,9 +403,10 @@ class CurriculumPage(QWidget):
         toolbar.addWidget(self.delete_btn)
         toolbar.addWidget(self.refresh_btn)
 
-        self.table = QTableWidget(0, 4)
+        self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
             [
+                "ID",
                 "Группа",
                 "Дисциплина",
                 "Тип занятия",
@@ -362,6 +419,8 @@ class CurriculumPage(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().sectionClicked.connect(self._toggle_sort)
+        self.table.setColumnWidth(self.COL_ID, 70)
         self.table.setColumnWidth(self.COL_GROUP, 180)
         self.table.setColumnWidth(self.COL_SUBJECT, 260)
         self.table.setColumnWidth(self.COL_PART_TYPE, 170)
@@ -378,6 +437,7 @@ class CurriculumPage(QWidget):
         self.refresh_btn.clicked.connect(self.refresh)
         self.calendar_combo.currentIndexChanged.connect(self._calendar_changed)
         self.add_calendar_btn.clicked.connect(self._create_calendar_dialog)
+        self.search_edit.textChanged.connect(self._apply_filters)
 
         self._load_calendars()
         self.refresh()
@@ -490,11 +550,12 @@ class CurriculumPage(QWidget):
             raise ValueError("Название дисциплины не может быть пустым.")
 
         with self._curriculum_repo._session_factory() as conn:
+            # Ищем дисциплину без учета регистра и лишних пробелов
             row = conn.execute(
                 """
                 SELECT id_subject
                 FROM Subjects
-                WHERE subject_name=?
+                WHERE LOWER(TRIM(subject_name))=LOWER(?)
                 """,
                 (subject_name,),
             ).fetchone()
@@ -502,6 +563,7 @@ class CurriculumPage(QWidget):
             if row:
                 return int(row[0])
 
+            # Создаем новую дисциплину
             cur = conn.execute(
                 """
                 INSERT INTO Subjects(subject_name)
@@ -549,10 +611,11 @@ class CurriculumPage(QWidget):
             QMessageBox.warning(self, "Ошибка", "Сначала выберите календарь.")
             return
 
-        dlg = CurriculumEditDialog(
+        dlg = CurriculumAddDialog(
             self,
             groups_repo=self._groups_repo,
             subjects_repo=self._subjects_repo,
+            last_group_id=self._last_selected_group_id,  # Передаем последнюю группу
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -567,32 +630,76 @@ class CurriculumPage(QWidget):
             QMessageBox.warning(self, "Ошибка", "Нужно указать дисциплину.")
             return
 
-        if int(data["hours_in_semester"]) <= 0:
-            QMessageBox.warning(self, "Ошибка", "Часы в семестре должны быть больше 0.")
+        if not data["selected_types"]:
+            QMessageBox.warning(self, "Ошибка", "Нужно выбрать хотя бы один тип занятия.")
             return
 
         try:
+            # Запоминаем выбранную группу
+            self._last_selected_group_id = data["group_id"]
+            
             subject_id = self._ensure_subject(
                 subject_name=str(data["subject_name"]),
                 subject_id=data["subject_id"],
             )
 
-            curriculum_id = self._curriculum_repo.create_curriculum_item(
-                group_id=int(data["group_id"]),
-                subject_id=int(subject_id),
-                part_type=str(data["part_type"]),
-                required_room_type=str(data["required_room_type"]),
-                hours_total_year=int(data["hours_total_year"]),
-                comment=data["comment"],
-            )
-            self._curriculum_repo.create_semester_plan(
-                curriculum_id=int(curriculum_id),
-                calendar_id=int(self._current_calendar_id),
-                hours_in_semester=int(data["hours_in_semester"]),
-                credits=None,
-                spread_mode="auto_even",
-                comment=data["comment"],
-            )
+            # Автоматическое определение типа аудитории по типу занятия
+            room_type_mapping = {
+                "lecture": "lecture",
+                "practice": "classroom",
+                "computer_practice": "computer",
+                "lab": "lab",
+            }
+
+            # Создаем записи для каждого выбранного типа занятия
+            added_count = 0
+            split_into_subgroups = data.get("split_into_subgroups", False)
+            
+            for type_data in data["selected_types"]:
+                part_type = type_data["part_type"]
+                hours_in_semester = type_data["hours_in_semester"]
+                required_room_type = room_type_mapping.get(part_type, "classroom")
+
+                if split_into_subgroups:
+                    # Создаем две записи для подгрупп А и Б
+                    for subgroup_label in ["A", "B"]:
+                        curriculum_id = self._curriculum_repo.create_curriculum_item(
+                            group_id=int(data["group_id"]),
+                            subject_id=int(subject_id),
+                            part_type=str(part_type),
+                            required_room_type=str(required_room_type),
+                            hours_total_year=0,
+                            comment=f"Подгруппа {subgroup_label}",
+                        )
+                        self._curriculum_repo.create_semester_plan(
+                            curriculum_id=int(curriculum_id),
+                            calendar_id=int(self._current_calendar_id),
+                            hours_in_semester=int(hours_in_semester),
+                            credits=None,
+                            spread_mode="auto_even",
+                            comment=f"Подгруппа {subgroup_label}",
+                        )
+                        added_count += 1
+                else:
+                    # Создаем одну запись для всей группы
+                    curriculum_id = self._curriculum_repo.create_curriculum_item(
+                        group_id=int(data["group_id"]),
+                        subject_id=int(subject_id),
+                        part_type=str(part_type),
+                        required_room_type=str(required_room_type),
+                        hours_total_year=0,
+                        comment=None,
+                    )
+                    self._curriculum_repo.create_semester_plan(
+                        curriculum_id=int(curriculum_id),
+                        calendar_id=int(self._current_calendar_id),
+                        hours_in_semester=int(hours_in_semester),
+                        credits=None,
+                        spread_mode="auto_even",
+                        comment=None,
+                    )
+                    added_count += 1
+
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -602,7 +709,7 @@ class CurriculumPage(QWidget):
             return
 
         self.refresh()
-        self._set_status("Запись учебного плана добавлена.")
+        self._set_status(f"Добавлено записей учебного плана: {added_count}")
 
     def _edit_record(self) -> None:
         record = self._selected_record()
@@ -645,8 +752,8 @@ class CurriculumPage(QWidget):
                 subject_id=int(subject_id),
                 part_type=str(data["part_type"]),
                 required_room_type=str(data["required_room_type"]),
-                hours_total_year=int(data["hours_total_year"]),
-                comment=data["comment"],
+                hours_total_year=0,  # Не используется
+                comment=None,
             )
 
             with self._curriculum_repo._session_factory() as conn:
@@ -659,7 +766,7 @@ class CurriculumPage(QWidget):
                     """,
                     (
                         int(data["hours_in_semester"]),
-                        data["comment"],
+                        None,
                         int(record["id_plan"]),
                     ),
                 )
@@ -719,7 +826,7 @@ class CurriculumPage(QWidget):
             return
 
         try:
-            rows = self._fetch_rows()
+            self._all_rows = list(self._fetch_rows())
         except Exception as exc:
             self.table.setRowCount(0)
             self._set_status(
@@ -728,16 +835,77 @@ class CurriculumPage(QWidget):
             )
             return
 
+        self._apply_filters()
+
+    def _toggle_sort(self, column: int) -> None:
+        if self._sort_column != column:
+            self._sort_column = column
+            self._sort_order = 1
+        elif self._sort_order == 1:
+            self._sort_order = -1
+        else:
+            self._sort_column = None
+            self._sort_order = 0
+
+        self._apply_filters()
+
+    def _apply_filters(self) -> None:
+        rows = list(self._all_rows)
+        query = self.search_edit.text().strip().lower()
+
+        if query:
+            filtered = []
+            for record in rows:
+                haystack = " ".join(
+                    [
+                        str(record.get("group_name", "") or ""),
+                        str(record.get("subject_name", "") or ""),
+                        str(record.get("part_type", "") or ""),
+                        str(record.get("hours_in_semester", "") or ""),
+                        str(record.get("comment", "") or ""),
+                    ]
+                ).lower()
+                if query in haystack:
+                    filtered.append(record)
+            rows = filtered
+
+        if self._sort_column is not None and self._sort_order != 0:
+            key_map = {
+                self.COL_ID: lambda x: int(x.get("id_curriculum", 0) or 0),
+                self.COL_GROUP: lambda x: str(x.get("group_name", "") or "").lower(),
+                self.COL_SUBJECT: lambda x: str(x.get("subject_name", "") or "").lower(),
+                self.COL_PART_TYPE: lambda x: str(x.get("part_type", "") or "").lower(),
+                self.COL_HOURS_SEMESTER: lambda x: int(x.get("hours_in_semester", 0) or 0),
+            }
+            rows.sort(key=key_map[self._sort_column], reverse=self._sort_order < 0)
+
+        self._update_header_labels()
+        self._render_rows(rows)
+
+    def _update_header_labels(self) -> None:
+        base_headers = ["ID", "Группа", "Дисциплина", "Тип занятия", "Часы/семестр"]
+        headers = []
+        for idx, title in enumerate(base_headers):
+            if self._sort_column == idx:
+                headers.append(f"{title} {'▲' if self._sort_order > 0 else '▼' if self._sort_order < 0 else ''}".strip())
+            else:
+                headers.append(title)
+        self.table.setHorizontalHeaderLabels(headers)
+
+    def _render_rows(self, rows: list[dict]) -> None:
+        self.table.clearSpans()
         self.table.setRowCount(0)
 
         for row_idx, record in enumerate(rows):
             self.table.insertRow(row_idx)
 
+            id_curriculum = int(record.get("id_curriculum", 0) or 0)
             group_name = str(record.get("group_name", "") or "")
             subject_name = str(record.get("subject_name", "") or "")
             part_type = str(record.get("part_type", "") or "")
             hours_in_semester = int(record.get("hours_in_semester", 0) or 0)
 
+            id_item = QTableWidgetItem(str(id_curriculum))
             group_item = QTableWidgetItem(group_name)
             group_item.setData(Qt.ItemDataRole.UserRole, record)
 
@@ -747,12 +915,87 @@ class CurriculumPage(QWidget):
             )
             hours_item = QTableWidgetItem(str(hours_in_semester))
 
+            self.table.setItem(row_idx, self.COL_ID, id_item)
             self.table.setItem(row_idx, self.COL_GROUP, group_item)
             self.table.setItem(row_idx, self.COL_SUBJECT, subject_item)
             self.table.setItem(row_idx, self.COL_PART_TYPE, part_type_item)
             self.table.setItem(row_idx, self.COL_HOURS_SEMESTER, hours_item)
 
+        # Объединение ячеек с одинаковыми значениями
+        self._merge_duplicate_cells(rows)
+
         self._set_status(f"Загружено записей учебного плана: {len(rows)}")
+
+    def _merge_duplicate_cells(self, rows: list[dict]) -> None:
+        if not rows:
+            return
+
+        # Объединение для столбца "Группа"
+        self._merge_column_cells(rows, self.COL_GROUP, "group_name")
+        
+        # Объединение для столбца "Дисциплина" (с учетом группы)
+        self._merge_column_cells_with_context(
+            rows, 
+            self.COL_SUBJECT, 
+            "subject_name",
+            context_key="group_name"
+        )
+
+    def _merge_column_cells(self, rows: list[dict], col_idx: int, key: str) -> None:
+        if not rows:
+            return
+
+        start_row = 0
+        current_value = rows[0].get(key)
+
+        for row_idx in range(1, len(rows)):
+            value = rows[row_idx].get(key)
+            
+            if value != current_value:
+                # Объединяем предыдущий диапазон
+                if row_idx - start_row > 1:
+                    self.table.setSpan(start_row, col_idx, row_idx - start_row, 1)
+                
+                # Начинаем новый диапазон
+                start_row = row_idx
+                current_value = value
+
+        # Объединяем последний диапазон
+        if len(rows) - start_row > 1:
+            self.table.setSpan(start_row, col_idx, len(rows) - start_row, 1)
+
+    def _merge_column_cells_with_context(
+        self, 
+        rows: list[dict], 
+        col_idx: int, 
+        key: str,
+        context_key: str
+    ) -> None:
+        if not rows:
+            return
+
+        start_row = 0
+        current_value = rows[0].get(key)
+        current_context = rows[0].get(context_key)
+
+        for row_idx in range(1, len(rows)):
+            value = rows[row_idx].get(key)
+            context = rows[row_idx].get(context_key)
+            
+            # Если изменился контекст или значение
+            if value != current_value or context != current_context:
+                # Объединяем предыдущий диапазон
+                if row_idx - start_row > 1:
+                    self.table.setSpan(start_row, col_idx, row_idx - start_row, 1)
+                
+                # Начинаем новый диапазон
+                start_row = row_idx
+                current_value = value
+                current_context = context
+
+        # Объединяем последний диапазон
+        if len(rows) - start_row > 1:
+            self.table.setSpan(start_row, col_idx, len(rows) - start_row, 1)
 
 
 def sqlite_dict_factory(cursor, row):

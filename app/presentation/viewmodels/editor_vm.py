@@ -8,15 +8,13 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from app.application.use_cases.apply_manual_edit import (
     ApplyManualEditCommand,
     ApplyManualEditUseCase,
+    CreateManualEntryCommand,
 )
 from app.application.dto.schedule_dto import ScheduleEntryDTO, ScheduleVariantDTO
 
 
 @dataclass(frozen=True)
 class EditorCellItem:
-    """
-    Данные одной записи, отображаемой в ячейке сетки.
-    """
 
     id_schedule: int
     variant_id: int
@@ -339,6 +337,56 @@ class EditorViewModel(QObject):
             edited_by=edited_by,
             lock_after_edit=lock_after_edit,
         )
+
+    def create_entry(
+        self,
+        *,
+        event_id: int,
+        curriculum_id: int,
+        slot_id: int,
+        group_id: int,
+        teacher_id: int,
+        room_id: int,
+        comment: Optional[str] = None,
+        edited_by: str = "manual_editor",
+        lock_after_edit: bool = True,
+    ) -> Optional[ScheduleEntryDTO]:
+        if self._variant_id is None:
+            self._set_error("Сначала нужно загрузить вариант расписания.")
+            return None
+
+        try:
+            command = CreateManualEntryCommand(
+                variant_id=int(self._variant_id),
+                event_id=int(event_id),
+                curriculum_id=int(curriculum_id),
+                slot_id=int(slot_id),
+                group_id=int(group_id),
+                teacher_id=int(teacher_id),
+                room_id=int(room_id),
+                comment=comment,
+                edited_by=edited_by,
+                lock_after_edit=bool(lock_after_edit),
+            )
+            created = self._apply_manual_edit_uc.create_entry(command)
+        except Exception as exc:
+            self._set_error(str(exc))
+            return None
+
+        refreshed = self.load_variant(int(self._variant_id))
+        if refreshed is None:
+            self._set_error("Запись создана, но вариант не удалось перезагрузить.")
+            return None
+
+        updated_entry = self.get_entry_by_schedule_id(int(created.id_schedule)) or created
+        self._selected_entry = updated_entry
+        self.infoChanged.emit(
+            f"Создана запись id={int(updated_entry.id_schedule)}."
+        )
+        self.errorChanged.emit("")
+        self.editApplied.emit(updated_entry)
+        self.entrySelected.emit(updated_entry)
+        return updated_entry
 
     # ---------------------------------------------------------
     # Internal
