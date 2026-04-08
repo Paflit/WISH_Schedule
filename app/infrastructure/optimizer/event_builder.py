@@ -238,6 +238,7 @@ class EventBuilder:
                 pairs_by_week_type = self._distribute_pairs_by_week_type(
                     pairs_per_cycle=pairs_per_cycle,
                     week_types=template_week_types,
+                    rotation_offset=plan_id,
                 )
 
                 for fixed_week_type, pairs_count in pairs_by_week_type:
@@ -292,11 +293,16 @@ class EventBuilder:
         *,
         pairs_per_cycle: int,
         week_types: List[int],
+        rotation_offset: int = 0,
     ) -> List[tuple[int, int]]:
         active_week_types = [wt for wt in week_types if wt > 0] or [1]
         n = len(active_week_types)
         base = pairs_per_cycle // n
         remainder = pairs_per_cycle % n
+
+        if n > 1 and remainder > 0:
+            shift = int(rotation_offset) % n
+            active_week_types = active_week_types[shift:] + active_week_types[:shift]
 
         result: List[tuple[int, int]] = []
         for idx, wt in enumerate(active_week_types):
@@ -307,7 +313,7 @@ class EventBuilder:
         if not result:
             result.append((active_week_types[0], 1))
 
-        return result
+        return sorted(result, key=lambda x: x[0])
 
     def _make_atomic_event(
         self,

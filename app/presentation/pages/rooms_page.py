@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -151,11 +151,67 @@ class RoomEditDialog(QDialog):
         return room_number, primary_room_type, room_types, capacity
 
 
-class RoomsPage(QWidget):
+class CreateCalendarDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Добавление семестра")
+        self.resize(420, 220)
 
-    def __init__(self, rooms_repo):
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        root.addLayout(form)
+
+        self.academic_year_combo = QComboBox()
+        self.academic_year_combo.setEditable(True)
+        self.academic_year_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.academic_year_combo.addItems(["2025/2026", "2026/2027", "2027/2028"])
+        form.addRow("Учебный год:", self.academic_year_combo)
+
+        self.semester_combo = QComboBox()
+        self.semester_combo.addItem("1 семестр", 1)
+        self.semester_combo.addItem("2 семестр", 2)
+        form.addRow("Семестр:", self.semester_combo)
+
+        self.include_saturday = QComboBox()
+        self.include_saturday.addItem("Без субботы", False)
+        self.include_saturday.addItem("С субботой", True)
+        form.addRow("Режим:", self.include_saturday)
+
+        self.pairs_per_day_spin = QSpinBox()
+        self.pairs_per_day_spin.setRange(1, 12)
+        self.pairs_per_day_spin.setValue(8)
+        form.addRow("Пар в день:", self.pairs_per_day_spin)
+
+        self.weeks_in_semester_spin = QSpinBox()
+        self.weeks_in_semester_spin.setRange(1, 30)
+        self.weeks_in_semester_spin.setValue(18)
+        form.addRow("Недель в семестре:", self.weeks_in_semester_spin)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        root.addWidget(self.button_box)
+
+    def get_data(self) -> dict:
+        return {
+            "academic_year": self.academic_year_combo.currentText().strip(),
+            "semester": int(self.semester_combo.currentData()),
+            "include_saturday": bool(self.include_saturday.currentData()),
+            "pairs_per_day": int(self.pairs_per_day_spin.value()),
+            "weeks_in_semester": int(self.weeks_in_semester_spin.value()),
+        }
+
+
+class RoomsPage(QWidget):
+    calendarCreated = pyqtSignal(int)
+
+    def __init__(self, rooms_repo, calendar_repo):
         super().__init__()
         self._rooms_repo = rooms_repo
+        self._calendar_repo = calendar_repo
+        self._current_calendar_id: Optional[int] = None
         self._all_rows: list[object] = []
         self._sort_column: Optional[int] = None
         self._sort_order: int = 0
@@ -164,6 +220,16 @@ class RoomsPage(QWidget):
 
         toolbar = QHBoxLayout()
         root.addLayout(toolbar)
+
+        toolbar.addWidget(QLabel("Календарь:"))
+
+        self.calendar_combo = QComboBox()
+        toolbar.addWidget(self.calendar_combo)
+
+        self.add_calendar_btn = QPushButton("+")
+        self.add_calendar_btn.setFixedWidth(32)
+        self.add_calendar_btn.setToolTip("Добавить семестр")
+        toolbar.addWidget(self.add_calendar_btn)
 
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Поиск по таблице...")
@@ -209,7 +275,10 @@ class RoomsPage(QWidget):
         self.delete_btn.clicked.connect(self._delete_room)
         self.refresh_btn.clicked.connect(self.refresh)
         self.search_edit.textChanged.connect(self._apply_filters)
+        self.calendar_combo.currentIndexChanged.connect(self._calendar_changed)
+        self.add_calendar_btn.clicked.connect(self._create_calendar_dialog)
 
+        self._load_calendars()
         self.refresh()
 
     def _set_status(self, text: str, error: bool = False) -> None:
@@ -229,6 +298,78 @@ class RoomsPage(QWidget):
             return int(item.data(Qt.ItemDataRole.UserRole))
         except (TypeError, ValueError):
             return None
+
+    def _select_calendar_by_id(self, calendar_id: int) -> None:
+        idx = self.calendar_combo.findData(int(calendar_id))
+        if idx >= 0:
+            self.calendar_combo.setCurrentIndex(idx)
+            self._current_calendar_id = int(calendar_id)
+
+    def _load_calendars(self) -> None:
+        previous_calendar_id = self._current_calendar_id
+        self.calendar_combo.blockSignals(True)
+        self.calendar_combo.clear()
+        try:
+            calendars = self._calendar_repo.list_calendars()
+        except Exception as exc:
+            self._set_status(f"Не удалось загрузить календари: {exc}", error=True)
+            self.calendar_combo.blockSignals(False)
+            return
+
+        for cal in calendars:
+            label = (
+                f"{getattr(cal, 'academic_year', '')} | "
+                f"семестр {getattr(cal, 'semester', '')} "
+                f"(id={getattr(cal, 'id_calendar', '')})"
+            )
+            self.calendar_combo.addItem(label, int(cal.id_calendar))
+
+        if self.calendar_combo.count() > 0:
+            if previous_calendar_id is not None:
+                idx = self.calendar_combo.findData(int(previous_calendar_id))
+                if idx >= 0:
+                    self.calendar_combo.setCurrentIndex(idx)
+            self._current_calendar_id = int(self.calendar_combo.currentData())
+        else:
+            self._current_calendar_id = None
+
+        self.calendar_combo.blockSignals(False)
+
+    def _calendar_changed(self) -> None:
+        value = self.calendar_combo.currentData()
+        self._current_calendar_id = int(value) if value is not None else None
+
+    def _create_calendar_dialog(self) -> None:
+        dlg = CreateCalendarDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        data = dlg.get_data()
+        if not data["academic_year"]:
+            QMessageBox.warning(self, "Ошибка", "Учебный год не может быть пустым.")
+            return
+
+        try:
+            calendar_id = self._calendar_repo.create_calendar(
+                academic_year=str(data["academic_year"]),
+                semester=int(data["semester"]),
+                include_saturday=bool(data["include_saturday"]),
+                pairs_per_day=int(data["pairs_per_day"]),
+                weeks_in_semester=int(data["weeks_in_semester"]),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать семестр:\n{exc}")
+            return
+
+        self._load_calendars()
+        self._select_calendar_by_id(int(calendar_id))
+        self._set_status("Семестр успешно создан.")
+        self.calendarCreated.emit(int(calendar_id))
+
+    def refresh_calendars(self, selected_calendar_id: Optional[int] = None) -> None:
+        self._load_calendars()
+        if selected_calendar_id is not None:
+            self._select_calendar_by_id(int(selected_calendar_id))
 
     @staticmethod
     def _room_type_label(value: str) -> str:

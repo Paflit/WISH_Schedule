@@ -36,10 +36,12 @@ class MainWindow(QMainWindow):
         # Pages
         self.groups_page = GroupsPage(
             groups_repo=self.container.groups_repo,
+            calendar_repo=self.container.calendar_repo,
         )
 
         self.rooms_page = RoomsPage(
             rooms_repo=self.container.rooms_repo,
+            calendar_repo=self.container.calendar_repo,
         )
 
         self.curriculum_page = CurriculumPage(
@@ -102,7 +104,27 @@ class MainWindow(QMainWindow):
 
         # Cross-page wiring
         self.generate_page.variantOpenRequested.connect(self._open_variant_in_editor)
+        self.groups_page.calendarCreated.connect(self._on_calendar_created)
+        self.rooms_page.calendarCreated.connect(self._on_calendar_created)
+        self.curriculum_page.calendarCreated.connect(self._on_calendar_created)
+        self.teachers_page.calendarCreated.connect(self._on_calendar_created)
+        self.generate_page.calendarCreated.connect(self._on_calendar_created)
 
     def _open_variant_in_editor(self, variant_id: int) -> None:
         self.editor_page.open_variant(int(variant_id))
         self.tabs.setCurrentWidget(self.editor_page)
+
+    def _on_calendar_created(self, calendar_id: int) -> None:
+        target_calendar_id = int(calendar_id)
+        for page in (
+            self.groups_page,
+            self.rooms_page,
+            self.curriculum_page,
+            self.teachers_page,
+            self.drafts_page,
+            self.generate_page,
+            self.editor_page,
+        ):
+            refresh_method = getattr(page, "refresh_calendars", None)
+            if callable(refresh_method):
+                refresh_method(target_calendar_id)

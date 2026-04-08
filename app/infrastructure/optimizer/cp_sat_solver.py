@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from itertools import product
 import random
 import re
 from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
@@ -24,8 +25,8 @@ from app.domain.rules import SchedulingRules
 # Константы и helpers
 # ============================================================
 
-MAX_ROOMS_PER_EVENT = 4
-MAX_SLOTS_PER_EVENT = 32
+MAX_ROOMS_PER_EVENT = 8
+MAX_SLOTS_PER_EVENT = 48
 
 # Чем меньше число — тем более специализированная аудитория.
 ROOM_SPECIALIZATION_RANK = {
@@ -372,6 +373,77 @@ class CPSatScheduleSolver:
         if not study_slots:
             raise ValidationError("Solver: нет учебных слотов (без обеденных перерывов).")
 
+        event_week_types = sorted(
+            {
+                _positive_int(getattr(e, "fixed_week_type", 0))
+                for e in events
+                if _positive_int(getattr(e, "fixed_week_type", 0)) > 0
+            }
+        )
+        if len(event_week_types) > 1 and all(
+            _positive_int(getattr(e, "fixed_week_type", 0)) > 0 for e in events
+        ):
+            solutions_by_week: List[List[Solution]] = []
+            for week_type in event_week_types:
+                week_slots = [
+                    s for s in study_slots
+                    if _positive_int(getattr(s, "week_type", 0)) == int(week_type)
+                ]
+                week_events = [
+                    e for e in events
+                    if _positive_int(getattr(e, "fixed_week_type", 0)) == int(week_type)
+                ]
+                week_locks = [
+                    lk for lk in (locks or [])
+                    if _positive_int(getattr(lk, "event_id", 0)) in {
+                        _positive_int(getattr(e, "id_event", 0)) for e in week_events
+                    }
+                ]
+
+                if not week_events or not week_slots:
+                    continue
+
+                week_solutions = self.solve(
+                    teachers=teachers,
+                    groups=groups,
+                    rooms=rooms,
+                    slots=week_slots,
+                    curriculum=curriculum,
+                    events=week_events,
+                    teacher_subjects=teacher_subjects,
+                    teacher_availability=teacher_availability,
+                    rules=rules,
+                    k_solutions=k_solutions,
+                    time_limit_seconds=time_limit_seconds,
+                    random_seed=random_seed,
+                    locks=week_locks,
+                    subject_names_by_id=subject_names_by_id,
+                )
+                if not week_solutions:
+                    return []
+                solutions_by_week.append(week_solutions)
+
+            combined: List[Solution] = []
+            for combo in product(*solutions_by_week):
+                entries: List[SolutionEntry] = []
+                objective_value = 0
+                meta: Dict[str, object] = {"status": "FEASIBLE", "decomposed_by_week_type": True}
+                for part in combo:
+                    entries.extend(list(part.entries or []))
+                    objective_value += int(getattr(part, "objective_value", 0) or 0)
+                combined.append(
+                    Solution(
+                        entries=entries,
+                        objective_value=objective_value,
+                        meta=meta,
+                    )
+                )
+                if len(combined) >= k_solutions:
+                    break
+
+            combined.sort(key=lambda s: int(getattr(s, "objective_value", 0) or 0))
+            return combined[:k_solutions]
+
         lock_map: Dict[int, ScheduleLock] = {}
         for lk in locks or []:
             eid = _positive_int(getattr(lk, "event_id", 0))
@@ -675,9 +747,19 @@ class CPSatScheduleSolver:
         all_group_daykeys = sorted({key[1] for key in group_day_usage_any.keys()})
         all_week_types = sorted({daykey[0] for daykey in all_group_daykeys})
         all_days_of_week = sorted({daykey[1] for daykey in all_group_daykeys})
+        required_pairs_by_group_week: DefaultDict[Tuple[int, int], int] = defaultdict(int)
+        for e in events:
+            wt = _positive_int(getattr(e, "fixed_week_type", 0))
+            if wt <= 0:
+                continue
+            for gid in list(getattr(e, "group_ids", []) or [getattr(e, "group_id", 0)]):
+                gid_int = _positive_int(gid)
+                if gid_int > 0:
+                    required_pairs_by_group_week[(gid_int, wt)] += 1
 
         student_gap_terms: List[cp_model.LinearExpr] = []
         student_day_load_terms: List[cp_model.LinearExpr] = []
+        student_balance_terms: List[cp_model.LinearExpr] = []
 
         for group in groups:
             gid = _positive_int(getattr(group, "id_group", 0))
@@ -685,6 +767,7 @@ class CPSatScheduleSolver:
                 continue
 
             used_day_flags: Dict[Tuple[int, int], cp_model.IntVar] = {}
+            day_load_vars: Dict[Tuple[int, int], cp_model.IntVar] = {}
 
             for daykey in sorted({key[1] for key in group_day_pair_usage.keys() if key[0] == gid}):
                 occupied_by_pair: Dict[int, cp_model.IntVar] = {}
@@ -709,10 +792,7 @@ class CPSatScheduleSolver:
                     f"group_{gid}_{daykey[0]}_{daykey[1]}_load",
                 )
                 model.Add(day_load == sum(occupied_by_pair.values()))
-
-                # Жесткое ограничение: если день активен, то 2..5 пар.
-                model.Add(day_load >= min_pairs_students_per_day * has_day)
-                model.Add(day_load <= max_pairs_students_per_day * has_day)
+                day_load_vars[daykey] = day_load
 
                 # Жесткое отсутствие окон у студентов.
                 gaps = _gaps_for_day(
@@ -727,7 +807,10 @@ class CPSatScheduleSolver:
                 model.Add(gaps == 0)
                 student_gap_terms.append(gaps)
 
-                # Soft-термы можно сохранить как нулевые для совместимости панели метрик.
+                # Жесткое ограничение: если день активен, то 2..5 пар.
+                model.Add(day_load >= min_pairs_students_per_day * has_day)
+                model.Add(day_load <= max_pairs_students_per_day * has_day)
+
                 low = model.NewIntVar(
                     0,
                     max_pair,
@@ -748,6 +831,7 @@ class CPSatScheduleSolver:
             # Жесткое ограничение: не более 5 учебных дней в каждой шаблонной неделе.
             for wt in all_week_types:
                 week_day_flags: List[cp_model.IntVar] = []
+                week_day_loads: List[cp_model.IntVar] = []
                 for day in all_days_of_week:
                     daykey = (wt, day)
                     flag = used_day_flags.get(daykey)
@@ -755,14 +839,55 @@ class CPSatScheduleSolver:
                         flag = model.NewBoolVar(f"group_{gid}_{wt}_{day}_has_day_const")
                         model.Add(flag == 0)
                     week_day_flags.append(flag)
+                    load_var = day_load_vars.get(daykey)
+                    if load_var is None:
+                        load_var = model.NewIntVar(0, 0, f"group_{gid}_{wt}_{day}_load_const")
+                        model.Add(load_var == 0)
+                    week_day_loads.append(load_var)
 
                 if len(week_day_flags) >= 5:
                     model.Add(sum(week_day_flags) <= 5)
+
+                required_pairs = int(required_pairs_by_group_week.get((gid, wt), 0) or 0)
+                if required_pairs <= 0:
+                    continue
+
+                target_days = min(5, max(1, required_pairs // max(1, min_pairs_students_per_day)))
+                target_days = min(target_days, len(week_day_flags))
+                days_used = model.NewIntVar(0, len(week_day_flags), f"group_{gid}_{wt}_days_used")
+                model.Add(days_used == sum(week_day_flags))
+
+                if target_days > 0:
+                    missing_days = model.NewIntVar(0, target_days, f"group_{gid}_{wt}_missing_days")
+                    model.Add(missing_days >= target_days - days_used)
+                    model.Add(missing_days >= 0)
+                    student_balance_terms.append(missing_days)
+
+                    preferred_daily_cap = max(
+                        min_pairs_students_per_day,
+                        (required_pairs + target_days - 1) // target_days,
+                    )
+                    preferred_daily_cap = min(preferred_daily_cap, max_pairs_students_per_day)
+                    for day_idx, day_load in enumerate(week_day_loads, start=1):
+                        over_preferred = model.NewIntVar(
+                            0,
+                            max_pairs_students_per_day,
+                            f"group_{gid}_{wt}_{day_idx}_over_preferred",
+                        )
+                        model.Add(over_preferred >= day_load - preferred_daily_cap)
+                        model.Add(over_preferred >= 0)
+                        student_balance_terms.append(over_preferred)
 
         if student_day_load_terms:
             objective_terms.append(
                 _positive_int(getattr(rules, "w_students_day_load", 500), 500)
                 * sum(student_day_load_terms)
+            )
+
+        if student_balance_terms:
+            objective_terms.append(
+                _positive_int(getattr(rules, "w_students_balance", 40), 40)
+                * sum(student_balance_terms)
             )
 
         # 7) Методдень преподавателя: желательно иметь хотя бы один полностью свободный день

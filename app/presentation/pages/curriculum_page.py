@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -350,6 +350,7 @@ class CurriculumEditDialog(QDialog):
 
 
 class CurriculumPage(QWidget):
+    calendarCreated = pyqtSignal(int)
 
     COL_ID = 0
     COL_GROUP = 1
@@ -455,6 +456,7 @@ class CurriculumPage(QWidget):
             self._current_calendar_id = int(calendar_id)
 
     def _load_calendars(self) -> None:
+        previous_calendar_id = self._current_calendar_id
         self.calendar_combo.blockSignals(True)
         self.calendar_combo.clear()
 
@@ -474,6 +476,10 @@ class CurriculumPage(QWidget):
             self.calendar_combo.addItem(label, int(cal.id_calendar))
 
         if self.calendar_combo.count() > 0:
+            if previous_calendar_id is not None:
+                idx = self.calendar_combo.findData(int(previous_calendar_id))
+                if idx >= 0:
+                    self.calendar_combo.setCurrentIndex(idx)
             self._current_calendar_id = int(self.calendar_combo.currentData())
         else:
             self._current_calendar_id = None
@@ -523,6 +529,13 @@ class CurriculumPage(QWidget):
         self._select_calendar_by_id(int(calendar_id))
         self.refresh()
         self._set_status("Семестр успешно создан.")
+        self.calendarCreated.emit(int(calendar_id))
+
+    def refresh_calendars(self, selected_calendar_id: Optional[int] = None) -> None:
+        self._load_calendars()
+        if selected_calendar_id is not None:
+            self._select_calendar_by_id(int(selected_calendar_id))
+        self.refresh()
 
     def _calendar_changed(self) -> None:
         value = self.calendar_combo.currentData()

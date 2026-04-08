@@ -95,6 +95,7 @@ class CreateCalendarDialog(QDialog):
 
 class GeneratePage(QWidget):
     variantOpenRequested = pyqtSignal(int)
+    calendarCreated = pyqtSignal(int)
 
     DEFAULT_VARIANTS_COUNT = 1
     DEFAULT_TIME_LIMIT_SECONDS = 600
@@ -278,8 +279,10 @@ class GeneratePage(QWidget):
         self._select_calendar_by_id(int(calendar_id))
         self._load_recent_variants(calendar_id=int(calendar_id))
         self._set_status("Семестр успешно создан.")
+        self.calendarCreated.emit(int(calendar_id))
 
     def _load_calendars(self) -> None:
+        previous_calendar_id = self.calendar_combo.currentData()
         self.calendar_combo.clear()
 
         try:
@@ -296,11 +299,22 @@ class GeneratePage(QWidget):
             )
             self.calendar_combo.addItem(label, int(cal.id_calendar))
 
+        if previous_calendar_id is not None:
+            idx = self.calendar_combo.findData(int(previous_calendar_id))
+            if idx >= 0:
+                self.calendar_combo.setCurrentIndex(idx)
+
         if self.calendar_combo.count() == 0:
             self._set_status("Календари не найдены.", error=True)
             self._offer_create_calendar_if_empty()
         else:
             self._set_status("Календари загружены.")
+
+    def refresh_calendars(self, selected_calendar_id: int | None = None) -> None:
+        self._load_calendars()
+        if selected_calendar_id is not None:
+            self._select_calendar_by_id(int(selected_calendar_id))
+        self._calendar_changed()
 
     def _load_recent_variants(self, calendar_id: int | None = None) -> None:
         try:

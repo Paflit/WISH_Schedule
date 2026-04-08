@@ -384,12 +384,25 @@ class DraftsPage(QWidget):
         self.status_label.setStyleSheet("color: #b42318;" if error else "color: #344054;")
 
     def _load_calendars(self) -> None:
+        previous_calendar_id = self._selected_calendar_id()
         self.calendar_combo.blockSignals(True)
         self.calendar_combo.clear()
         for cal in self._calendar_repo.list_calendars():
             label = f"{getattr(cal, 'academic_year', '')} | семестр {getattr(cal, 'semester', '')} (id={getattr(cal, 'id_calendar', '')})"
             self.calendar_combo.addItem(label, int(cal.id_calendar))
+        if previous_calendar_id is not None:
+            idx = self.calendar_combo.findData(int(previous_calendar_id))
+            if idx >= 0:
+                self.calendar_combo.setCurrentIndex(idx)
         self.calendar_combo.blockSignals(False)
+
+    def refresh_calendars(self, selected_calendar_id: Optional[int] = None) -> None:
+        self._load_calendars()
+        if selected_calendar_id is not None:
+            idx = self.calendar_combo.findData(int(selected_calendar_id))
+            if idx >= 0:
+                self.calendar_combo.setCurrentIndex(idx)
+        self.refresh()
 
     def _selected_calendar_id(self) -> Optional[int]:
         value = self.calendar_combo.currentData()

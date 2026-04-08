@@ -591,6 +591,7 @@ class EditorPage(QWidget):
         self.stack.addWidget(page)
 
     def _load_calendars(self) -> None:
+        previous_calendar_id = self.calendar_combo.currentData()
         self.calendar_combo.blockSignals(True)
         self.calendar_combo.clear()
         if self._calendar_repo is not None:
@@ -609,7 +610,20 @@ class EditorPage(QWidget):
                 )
                 self.calendar_combo.addItem(label, int(cal.id_calendar))
 
+        if previous_calendar_id is not None:
+            idx = self.calendar_combo.findData(int(previous_calendar_id))
+            if idx >= 0:
+                self.calendar_combo.setCurrentIndex(idx)
+
         self.calendar_combo.blockSignals(False)
+
+    def refresh_calendars(self, selected_calendar_id: Optional[int] = None) -> None:
+        self._load_calendars()
+        if selected_calendar_id is not None:
+            idx = self.calendar_combo.findData(int(selected_calendar_id))
+            if idx >= 0:
+                self.calendar_combo.setCurrentIndex(idx)
+        self._populate_variants()
 
     def _calendar_changed(self) -> None:
         self._populate_variants()
