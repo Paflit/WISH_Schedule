@@ -32,13 +32,13 @@ jobs:
 
       - name: Prepare portable folder
         run: |
-          mkdir release_out
-          xcopy /E /I /Y dist\WISH_Schedule release_out\WISH_Schedule
-          if not exist release_out\WISH_Schedule\data mkdir release_out\WISH_Schedule\data
-          if not exist release_out\WISH_Schedule\exports mkdir release_out\WISH_Schedule\exports
-          if not exist release_out\WISH_Schedule\imports mkdir release_out\WISH_Schedule\imports
-          if not exist release_out\WISH_Schedule\logs mkdir release_out\WISH_Schedule\logs
-          if exist data\schedule.db xcopy /Y data\schedule.db release_out\WISH_Schedule\data\
+          New-Item -ItemType Directory -Force -Path release_out | Out-Null
+          Copy-Item -Recurse -Force dist\WISH_Schedule release_out\WISH_Schedule
+          New-Item -ItemType Directory -Force -Path release_out\WISH_Schedule\data | Out-Null
+          New-Item -ItemType Directory -Force -Path release_out\WISH_Schedule\exports | Out-Null
+          New-Item -ItemType Directory -Force -Path release_out\WISH_Schedule\imports | Out-Null
+          New-Item -ItemType Directory -Force -Path release_out\WISH_Schedule\logs | Out-Null
+          if (Test-Path data\schedule.db) { Copy-Item -Force data\schedule.db release_out\WISH_Schedule\data\schedule.db }
 
       - name: Zip portable build
         run: |
