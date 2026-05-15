@@ -3,7 +3,7 @@ name: Build & Release (Windows)
 on:
   push:
     tags:
-      - "beta-gitv-0.01"  
+      - "v1.1"
 
 permissions:
   contents: write
@@ -28,21 +28,25 @@ jobs:
 
       - name: Build with PyInstaller (spec)
         run: |
-          pyinstaller --noconfirm --clean PracticWISH.spec
+          pyinstaller --noconfirm --clean WISH_Schedule.spec
 
       - name: Prepare portable folder
         run: |
           mkdir release_out
-          xcopy /E /I /Y dist\PracticWISH release_out\PracticWISH
-          xcopy /Y release\PracticWISH.bat release_out\PracticWISH\
-          xcopy /Y release\CreateDesktopShortcut.ps1 release_out\PracticWISH\
-          if exist Icon.ico (mkdir release_out\PracticWISH\assets & xcopy /Y assets\app.ico release_out\PracticWISH\assets\)
+          xcopy /E /I /Y dist\WISH_Schedule release_out\WISH_Schedule
+          if not exist release_out\WISH_Schedule\data mkdir release_out\WISH_Schedule\data
+          if not exist release_out\WISH_Schedule\exports mkdir release_out\WISH_Schedule\exports
+          if not exist release_out\WISH_Schedule\imports mkdir release_out\WISH_Schedule\imports
+          if not exist release_out\WISH_Schedule\logs mkdir release_out\WISH_Schedule\logs
+          if exist data\schedule.db xcopy /Y data\schedule.db release_out\WISH_Schedule\data\
 
       - name: Zip portable build
         run: |
-          powershell -Command "Compress-Archive -Path release_out\PracticWISH -DestinationPath PracticWISH-win64.zip -Force"
+          powershell -Command "Compress-Archive -Path release_out\WISH_Schedule -DestinationPath WISH_Schedule-win64.zip -Force"
 
       - name: Create GitHub Release & Upload Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: PracticWISH-win64.zip
+          tag_name: v1.1
+          name: WISH Schedule v1.1
+          files: WISH_Schedule-win64.zip

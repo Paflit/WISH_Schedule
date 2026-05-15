@@ -6,6 +6,11 @@ from app.presentation.qt_app import run
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--generate-worker":
+        from app.presentation.workers.generate_worker import main as worker_main
+
+        return int(worker_main([sys.argv[0], *sys.argv[2:]]))
+
     return int(run())
 
 

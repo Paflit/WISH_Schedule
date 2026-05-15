@@ -434,13 +434,21 @@ class GeneratePage(QWidget):
         self._process.finished.connect(self._on_process_finished)
 
         program = sys.executable
-        args = [
-            "-m",
-            "app.presentation.workers.generate_worker",
-            str(int(calendar_id)),
-            str(int(variants_count)),
-            str(int(time_limit_seconds)),
-        ]
+        if getattr(sys, "frozen", False):
+            args = [
+                "--generate-worker",
+                str(int(calendar_id)),
+                str(int(variants_count)),
+                str(int(time_limit_seconds)),
+            ]
+        else:
+            args = [
+                "-m",
+                "app.presentation.workers.generate_worker",
+                str(int(calendar_id)),
+                str(int(variants_count)),
+                str(int(time_limit_seconds)),
+            ]
 
         if use_base_variant:
             args.extend([
