@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS Subjects (
 );
 
 CREATE TABLE IF NOT EXISTS TeacherSubjects (
-    teacher_id INTEGER NOT NULL,
+    teacher_id INTEGER,
     subject_id INTEGER NOT NULL,
     can_lecture INTEGER NOT NULL DEFAULT 1,
     can_practice INTEGER NOT NULL DEFAULT 1,
@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS TeacherSubjects (
     PRIMARY KEY (teacher_id, subject_id),
     FOREIGN KEY (teacher_id) REFERENCES Teachers(id_teacher) ON DELETE CASCADE,
     FOREIGN KEY (subject_id) REFERENCES Subjects(id_subject) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS TeacherGroupAssignments (
+    teacher_id INTEGER NOT NULL,
+    group_id INTEGER NOT NULL,
+    PRIMARY KEY (teacher_id, group_id),
+    FOREIGN KEY (teacher_id) REFERENCES Teachers(id_teacher) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES StudentGroups(id_group) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS StudentGroups (
@@ -45,6 +53,14 @@ CREATE TABLE IF NOT EXISTS Classes (
   room_types_json TEXT,
   capacity INTEGER NOT NULL,
   building TEXT
+);
+
+CREATE TABLE IF NOT EXISTS RoomSubjectAssignments (
+    room_id INTEGER NOT NULL,
+    subject_id INTEGER NOT NULL,
+    PRIMARY KEY (room_id, subject_id),
+    FOREIGN KEY (room_id) REFERENCES Classes(id_class) ON DELETE CASCADE,
+    FOREIGN KEY (subject_id) REFERENCES Subjects(id_subject) ON DELETE CASCADE
 );
 
 -- ============================================================
@@ -168,8 +184,7 @@ CREATE TABLE IF NOT EXISTS GenerationDraftEntries (
     FOREIGN KEY (draft_id) REFERENCES GenerationDrafts(id_draft) ON DELETE CASCADE,
     FOREIGN KEY (slot_id) REFERENCES TimeSlots(id_slot) ON DELETE CASCADE,
     FOREIGN KEY (teacher_id) REFERENCES Teachers(id_teacher) ON DELETE SET NULL,
-    FOREIGN KEY (room_id) REFERENCES Classes(id_class) ON DELETE SET NULL,
-    UNIQUE (draft_id, event_id)
+    FOREIGN KEY (room_id) REFERENCES Classes(id_class) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS ScheduleEntries (
@@ -180,15 +195,15 @@ CREATE TABLE IF NOT EXISTS ScheduleEntries (
     group_id INTEGER,
     teacher_id INTEGER NOT NULL,
     curriculum_id INTEGER NOT NULL,
-    room_id INTEGER NOT NULL,
+    room_id INTEGER,
     is_locked INTEGER NOT NULL DEFAULT 0,
     comment TEXT,
     FOREIGN KEY (variant_id) REFERENCES ScheduleVariants(id_variant) ON DELETE CASCADE,
     FOREIGN KEY (slot_id) REFERENCES TimeSlots(id_slot) ON DELETE CASCADE,
     FOREIGN KEY (group_id) REFERENCES StudentGroups(id_group) ON DELETE SET NULL,
-    FOREIGN KEY (teacher_id) REFERENCES Teachers(id_teacher) ON DELETE RESTRICT,
+    FOREIGN KEY (teacher_id) REFERENCES Teachers(id_teacher) ON DELETE SET NULL,
     FOREIGN KEY (curriculum_id) REFERENCES CurriculumItems(id_curriculum) ON DELETE RESTRICT,
-    FOREIGN KEY (room_id) REFERENCES Classes(id_class) ON DELETE RESTRICT
+    FOREIGN KEY (room_id) REFERENCES Classes(id_class) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS ScheduleLocks (

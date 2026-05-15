@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Tuple, Optional, Set, Any
 from collections import defaultdict
+import re
 
 from app.domain.models import TimeSlot, ScheduleMetrics
 from app.domain.rules import SchedulingRules
@@ -51,6 +52,31 @@ def _student_day_load_penalty(load: int, rules: SchedulingRules) -> int:
     under = max(0, rules.min_pairs_students_per_day - load)
     over = max(0, load - rules.max_pairs_students_per_day)
     return under + over
+
+
+def _student_half_day_load_penalty(half_load: int, rules: SchedulingRules) -> int:
+    under = max(0, 2 * rules.min_pairs_students_per_day - half_load)
+    over = max(0, half_load - 2 * rules.max_pairs_students_per_day)
+    return under + over
+
+
+def _detect_subgroup_kind(subject_name: str) -> str:
+    name = str(subject_name or "").strip().lower()
+    if not name:
+        return "none"
+    if re.search(r"п\s*/\s*гр\.?\s*1", name):
+        return "subgroup_1"
+    if re.search(r"п\s*/\s*гр\.?\s*2", name):
+        return "subgroup_2"
+    if re.search(r"(?:^|[\s(\[\{])1\s*п\s*г\b", name):
+        return "subgroup_1"
+    if re.search(r"(?:^|[\s(\[\{])2\s*п\s*г\b", name):
+        return "subgroup_2"
+    if re.search(r"подгрупп\w*\s*1", name):
+        return "subgroup_1"
+    if re.search(r"подгрупп\w*\s*2", name):
+        return "subgroup_2"
+    return "none"
 
 
 def _teacher_over_soft_units(load: int, soft_max: int) -> int:
@@ -120,8 +146,9 @@ def compute_metrics(
     """
 
     # --- Собираем занятость по дням и парам ---
-    # group_occ[(group_id, daykey)] -> set(pair_number)
-    group_occ: Dict[Tuple[int, Tuple[int, int, int]], Set[int]] = defaultdict(set)
+    # group_common_occ[(group_id, daykey)] -> set(pair_number)
+    group_common_occ: Dict[Tuple[int, Tuple[int, int, int]], Set[int]] = defaultdict(set)
+    group_subgroup_occ: Dict[Tuple[int, str, Tuple[int, int, int]], Set[int]] = defaultdict(set)
     teacher_occ: Dict[Tuple[int, Tuple[int, int, int]], Set[int]] = defaultdict(set)
 
     # для лекций
@@ -139,7 +166,11 @@ def compute_metrics(
         group_id = getattr(e, "group_id")
         teacher_id = getattr(e, "teacher_id")
 
-        group_occ[(group_id, dk)].add(slot.pair_number)
+        subgroup_kind = _detect_subgroup_kind(str(getattr(e, "subject_name", "") or ""))
+        if subgroup_kind == "none":
+            group_common_occ[(group_id, dk)].add(slot.pair_number)
+        else:
+            group_subgroup_occ[(group_id, subgroup_kind, dk)].add(slot.pair_number)
         teacher_occ[(teacher_id, dk)].add(slot.pair_number)
 
         teacher_days_with_classes[(teacher_id, (slot.week_number_in_semester, slot.week_type))].add(slot.day_of_week)
@@ -165,7 +196,8 @@ def compute_metrics(
     # --- Студенты: окна + нагрузка в день + баланс (L1) ---
     student_gaps_units = 0
     student_day_load_units = 0
-    groups_in_schedule = {gid for (gid, _dk) in group_occ.keys()}
+    groups_in_schedule = {gid for (gid, _dk) in group_common_occ.keys()}
+    groups_in_schedule.update({gid for (gid, _kind, _dk) in group_subgroup_occ.keys()})
 
     # Баланс считаем как сумма |load - avg|
     student_balance_units_total = 0
@@ -173,21 +205,28 @@ def compute_metrics(
     for gid in groups_in_schedule:
         loads: List[int] = []
         for dk in all_daykeys:
-            occ = group_occ.get((gid, dk), set())
-            load = len(occ)
+            common_occ = group_common_occ.get((gid, dk), set())
+            subgroup_1_occ = group_subgroup_occ.get((gid, "subgroup_1", dk), set())
+            subgroup_2_occ = group_subgroup_occ.get((gid, "subgroup_2", dk), set())
+            half_load = 2 * len(common_occ) + len(subgroup_1_occ) + len(subgroup_2_occ)
+            load = half_load
             loads.append(load)
 
-            # нагрузка 2..5 (units)
-            student_day_load_units += _student_day_load_penalty(load, rules)
+            # нагрузка 2..5, подгрупповая пара считается как 0.5
+            student_day_load_units += _student_half_day_load_penalty(half_load, rules)
 
             if not rules.allow_student_gaps:
-                student_gaps_units += _count_gaps(
-                    occupied_pairs=occ,
-                    max_pair=max_pair,
-                    allow_lunch_gap=rules.allow_lunch_gap,
-                    lunch_min=rules.lunch_gap_min_pair,
-                    lunch_max=rules.lunch_gap_max_pair,
-                )
+                for subgroup_kind, subgroup_occ in (
+                    ("subgroup_1", subgroup_1_occ),
+                    ("subgroup_2", subgroup_2_occ),
+                ):
+                    student_gaps_units += _count_gaps(
+                        occupied_pairs=common_occ | subgroup_occ,
+                        max_pair=max_pair,
+                        allow_lunch_gap=rules.allow_lunch_gap,
+                        lunch_min=rules.lunch_gap_min_pair,
+                        lunch_max=rules.lunch_gap_max_pair,
+                    )
 
         if loads:
             avg = round(sum(loads) / len(loads))

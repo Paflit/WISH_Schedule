@@ -89,10 +89,11 @@ class EventBuilder:
         if not atomic_events:
             return []
 
-        final_events = self._merge_lecture_events_with_capacity(
-            events=atomic_events,
-            lock_map=lock_map,
-        )
+        # Не склеиваем лекции разных групп на этапе построения событий.
+        # Такое склеивание превращает оптимизационное пожелание в hard-связку
+        # между расписаниями групп и может конфликтовать с требованиями
+        # "без окон" и "2..5 пар в активный день".
+        final_events = atomic_events
         if not final_events:
             return []
 

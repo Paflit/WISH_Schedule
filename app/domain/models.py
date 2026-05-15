@@ -170,8 +170,8 @@ class Event:
 class SolutionEntry:
     event_id: int
     slot_id: int
-    teacher_id: int
-    room_id: int
+    teacher_id: Optional[int]
+    room_id: Optional[int]
 
 
 @dataclass

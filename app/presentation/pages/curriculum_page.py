@@ -13,6 +13,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -113,21 +115,23 @@ class CurriculumAddDialog(QDialog):
         self._last_group_id = last_group_id
 
         self.setWindowTitle("Добавление записи учебного плана")
-        self.resize(520, 400)
+        self.resize(620, 620)
 
         root = QVBoxLayout(self)
 
         form = QFormLayout()
         root.addLayout(form)
 
-        self.group_combo = QComboBox()
-        form.addRow("Группа:", self.group_combo)
-
         self.subject_combo = QComboBox()
         self.subject_combo.setEditable(True)
         self.subject_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.subject_combo.setPlaceholderText("Введите название дисциплины")
         form.addRow("Дисциплина:", self.subject_combo)
+
+        self.groups_list = QListWidget()
+        self.groups_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.groups_list.setMinimumHeight(220)
+        form.addRow("Группы:", self.groups_list)
 
         form.addRow(QLabel(""))
         form.addRow(QLabel("Типы занятий:"))
@@ -137,8 +141,9 @@ class CurriculumAddDialog(QDialog):
             checkbox = QCheckBox(label)
             spinbox = QSpinBox()
             spinbox.setRange(0, 500)
-            spinbox.setValue(36)
+            spinbox.setValue(32)
             spinbox.setEnabled(False)
+            subgroup_checkbox = QCheckBox("Подгруппы")
             
             checkbox.toggled.connect(lambda checked, sb=spinbox: sb.setEnabled(checked))
             
@@ -146,6 +151,7 @@ class CurriculumAddDialog(QDialog):
             row_layout.addWidget(checkbox)
             row_layout.addWidget(QLabel("Часы:"))
             row_layout.addWidget(spinbox)
+            row_layout.addWidget(subgroup_checkbox)
             row_layout.addStretch()
             
             form.addRow(row_layout)
@@ -153,17 +159,13 @@ class CurriculumAddDialog(QDialog):
             self.part_type_widgets[value] = {
                 "checkbox": checkbox,
                 "spinbox": spinbox,
+                "subgroup_checkbox": subgroup_checkbox,
             }
-
-        # Чекбокс для деления группы на подгруппы
-        form.addRow(QLabel(""))
-        self.split_subgroups_checkbox = QCheckBox("Делить группу на подгруппы (А и Б)")
-        form.addRow(self.split_subgroups_checkbox)
 
         hint = QLabel(
             "Отметьте нужные типы занятий и укажите количество часов для каждого. "
             "Тип аудитории определяется автоматически по типу занятия.\n\n"
-            "При делении группы на подгруппы будут созданы две записи с половиной студентов в каждой."
+            "Метка 'Подгруппы' применяется отдельно к каждому виду занятия."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #667085;")
@@ -180,18 +182,16 @@ class CurriculumAddDialog(QDialog):
         self._load_groups()
         self._load_subjects()
         
-        # Устанавливаем последнюю выбранную группу
-        if self._last_group_id is not None:
-            idx = self.group_combo.findData(self._last_group_id)
-            if idx >= 0:
-                self.group_combo.setCurrentIndex(idx)
-
     def _load_groups(self) -> None:
-        self.group_combo.clear()
+        self.groups_list.clear()
         groups = self._groups_repo.list_all()
         for group in groups:
             label = f"{group.group_name} ({group.quantity} чел.)"
-            self.group_combo.addItem(label, int(group.id_group))
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, int(group.id_group))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if self._last_group_id == int(group.id_group) else Qt.CheckState.Unchecked)
+            self.groups_list.addItem(item)
 
     def _load_subjects(self) -> None:
         self.subject_combo.clear()
@@ -211,14 +211,20 @@ class CurriculumAddDialog(QDialog):
                     selected_types.append({
                         "part_type": part_type,
                         "hours_in_semester": hours,
+                        "split_into_subgroups": widgets["subgroup_checkbox"].isChecked(),
                     })
+
+        group_ids = []
+        for idx in range(self.groups_list.count()):
+            item = self.groups_list.item(idx)
+            if item.checkState() == Qt.CheckState.Checked:
+                group_ids.append(int(item.data(Qt.ItemDataRole.UserRole)))
         
         return {
-            "group_id": self.group_combo.currentData(),
+            "group_ids": group_ids,
             "subject_id": self.subject_combo.currentData(),
             "subject_name": self.subject_combo.currentText().strip(),
             "selected_types": selected_types,
-            "split_into_subgroups": self.split_subgroups_checkbox.isChecked(),
         }
 
 
@@ -267,7 +273,7 @@ class CurriculumEditDialog(QDialog):
 
         self.hours_semester_spin = QSpinBox()
         self.hours_semester_spin.setRange(0, 500)
-        self.hours_semester_spin.setValue(36)
+        self.hours_semester_spin.setValue(32)
         form.addRow("Часы в семестре:", self.hours_semester_spin)
 
         hint = QLabel(
@@ -635,8 +641,8 @@ class CurriculumPage(QWidget):
 
         data = dlg.get_data()
 
-        if data["group_id"] is None:
-            QMessageBox.warning(self, "Ошибка", "Нужно выбрать группу.")
+        if not data["group_ids"]:
+            QMessageBox.warning(self, "Ошибка", "Нужно выбрать хотя бы одну группу.")
             return
 
         if not data["subject_name"]:
@@ -648,8 +654,7 @@ class CurriculumPage(QWidget):
             return
 
         try:
-            # Запоминаем выбранную группу
-            self._last_selected_group_id = data["group_id"]
+            self._last_selected_group_id = int(data["group_ids"][0])
             
             subject_id = self._ensure_subject(
                 subject_name=str(data["subject_name"]),
@@ -666,23 +671,44 @@ class CurriculumPage(QWidget):
 
             # Создаем записи для каждого выбранного типа занятия
             added_count = 0
-            split_into_subgroups = data.get("split_into_subgroups", False)
-            
-            for type_data in data["selected_types"]:
-                part_type = type_data["part_type"]
-                hours_in_semester = type_data["hours_in_semester"]
-                required_room_type = room_type_mapping.get(part_type, "classroom")
+            for group_id in data["group_ids"]:
+                for type_data in data["selected_types"]:
+                    part_type = type_data["part_type"]
+                    hours_in_semester = type_data["hours_in_semester"]
+                    required_room_type = room_type_mapping.get(part_type, "classroom")
+                    split_into_subgroups = bool(type_data.get("split_into_subgroups", False))
 
-                if split_into_subgroups:
-                    # Создаем две записи для подгрупп А и Б
-                    for subgroup_label in ["A", "B"]:
+                    if split_into_subgroups:
+                        for subgroup_label in ["1пг", "2пг"]:
+                            subgroup_subject_id = self._ensure_subject(
+                                subject_name=f"{str(data['subject_name']).strip()} ({subgroup_label})",
+                                subject_id=None,
+                            )
+                            curriculum_id = self._curriculum_repo.create_curriculum_item(
+                                group_id=int(group_id),
+                                subject_id=int(subgroup_subject_id),
+                                part_type=str(part_type),
+                                required_room_type=str(required_room_type),
+                                hours_total_year=0,
+                                comment=f"Подгруппа {subgroup_label}",
+                            )
+                            self._curriculum_repo.create_semester_plan(
+                                curriculum_id=int(curriculum_id),
+                                calendar_id=int(self._current_calendar_id),
+                                hours_in_semester=int(hours_in_semester),
+                                credits=None,
+                                spread_mode="auto_even",
+                                comment=f"Подгруппа {subgroup_label}",
+                            )
+                            added_count += 1
+                    else:
                         curriculum_id = self._curriculum_repo.create_curriculum_item(
-                            group_id=int(data["group_id"]),
+                            group_id=int(group_id),
                             subject_id=int(subject_id),
                             part_type=str(part_type),
                             required_room_type=str(required_room_type),
                             hours_total_year=0,
-                            comment=f"Подгруппа {subgroup_label}",
+                            comment=None,
                         )
                         self._curriculum_repo.create_semester_plan(
                             curriculum_id=int(curriculum_id),
@@ -690,28 +716,9 @@ class CurriculumPage(QWidget):
                             hours_in_semester=int(hours_in_semester),
                             credits=None,
                             spread_mode="auto_even",
-                            comment=f"Подгруппа {subgroup_label}",
+                            comment=None,
                         )
                         added_count += 1
-                else:
-                    # Создаем одну запись для всей группы
-                    curriculum_id = self._curriculum_repo.create_curriculum_item(
-                        group_id=int(data["group_id"]),
-                        subject_id=int(subject_id),
-                        part_type=str(part_type),
-                        required_room_type=str(required_room_type),
-                        hours_total_year=0,
-                        comment=None,
-                    )
-                    self._curriculum_repo.create_semester_plan(
-                        curriculum_id=int(curriculum_id),
-                        calendar_id=int(self._current_calendar_id),
-                        hours_in_semester=int(hours_in_semester),
-                        credits=None,
-                        spread_mode="auto_even",
-                        comment=None,
-                    )
-                    added_count += 1
 
         except Exception as exc:
             QMessageBox.critical(

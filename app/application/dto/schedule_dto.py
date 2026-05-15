@@ -42,7 +42,11 @@ class ScheduleEntryDTO:
 
     @property
     def display_subtitle(self) -> str:
-        parts = [self.group_name, self.teacher_name, self.room_number]
+        parts = [
+            self.group_name,
+            self.teacher_name or "Преподаватель не назначен",
+            self.room_number or "Аудитория не назначена",
+        ]
         return " | ".join(p for p in parts if p).strip()
 
     @property

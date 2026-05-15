@@ -99,21 +99,28 @@ class TeacherEditDialog(QDialog):
     def __init__(
         self,
         parent,
+        teachers_repo,
         subjects_repo,
+        groups_repo,
         calendar_repo,
         teacher: Optional[object] = None,
         selected_subject_ids: Optional[list[int]] = None,
         selected_subject_rules: Optional[dict[int, dict]] = None,
+        selected_group_ids: Optional[list[int]] = None,
         current_calendar_id: Optional[int] = None,
     ):
         super().__init__(parent)
+        self._teachers_repo = teachers_repo
         self._subjects_repo = subjects_repo
+        self._groups_repo = groups_repo
         self._calendar_repo = calendar_repo
         self._teacher = teacher
         self._selected_subject_ids = set(selected_subject_ids or [])
         self._selected_subject_rules = selected_subject_rules or {}
+        self._selected_group_ids = set(selected_group_ids or [])
         self._current_calendar_id = current_calendar_id
         self._subject_rule_widgets: dict[int, dict[str, QCheckBox]] = {}
+        self._group_widgets: dict[int, QCheckBox] = {}
 
         self.setWindowTitle(
             "Редактирование преподавателя" if teacher is not None else "Добавление преподавателя"
@@ -163,6 +170,17 @@ class TeacherEditDialog(QDialog):
 
         tabs.addTab(subjects_tab, "Дисциплины")
 
+        groups_tab = QWidget()
+        groups_layout = QVBoxLayout(groups_tab)
+        groups_layout.addWidget(QLabel("Если группы не выбраны, преподаватель может вести занятия у всех групп."))
+        self.groups_scroll = QScrollArea()
+        self.groups_scroll.setWidgetResizable(True)
+        self.groups_container = QWidget()
+        self.groups_layout = QVBoxLayout(self.groups_container)
+        self.groups_scroll.setWidget(self.groups_container)
+        groups_layout.addWidget(self.groups_scroll, 1)
+        tabs.addTab(groups_tab, "Группы")
+
         # Вкладка 2: Календарь доступности
         calendar_tab = QWidget()
         calendar_layout = QVBoxLayout(calendar_tab)
@@ -183,13 +201,20 @@ class TeacherEditDialog(QDialog):
             except:
                 pass
 
-        self.availability_calendar = AvailabilityCalendar(
+        self.availability_odd_calendar = AvailabilityCalendar(
+            pairs_per_day=pairs_per_day,
+            include_saturday=include_saturday
+        )
+        self.availability_even_calendar = AvailabilityCalendar(
             pairs_per_day=pairs_per_day,
             include_saturday=include_saturday
         )
         
+        availability_tabs = QTabWidget()
+        availability_tabs.addTab(self.availability_odd_calendar, "Нечётная неделя")
+        availability_tabs.addTab(self.availability_even_calendar, "Чётная неделя")
         scroll = QScrollArea()
-        scroll.setWidget(self.availability_calendar)
+        scroll.setWidget(availability_tabs)
         scroll.setWidgetResizable(True)
         calendar_layout.addWidget(scroll)
 
@@ -206,7 +231,9 @@ class TeacherEditDialog(QDialog):
         self.clear_all_btn.clicked.connect(self._clear_all_subjects)
 
         self._load_subjects()
+        self._load_groups()
         self._fill_teacher()
+        self._fill_availability()
 
     def _load_subjects(self) -> None:
         while self.subjects_grid.count():
@@ -295,6 +322,42 @@ class TeacherEditDialog(QDialog):
         self.name_combo.addItem(str(getattr(self._teacher, "full_name", "") or ""))
         self.name_combo.setCurrentText(str(getattr(self._teacher, "full_name", "") or ""))
 
+    def _load_groups(self) -> None:
+        while self.groups_layout.count():
+            item = self.groups_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._group_widgets.clear()
+        for group in self._groups_repo.list_all():
+            group_id = int(getattr(group, "id_group", 0) or 0)
+            checkbox = QCheckBox(str(getattr(group, "group_name", "") or f"id={group_id}"))
+            checkbox.setChecked(group_id in self._selected_group_ids)
+            self.groups_layout.addWidget(checkbox)
+            self._group_widgets[group_id] = checkbox
+        self.groups_layout.addStretch(1)
+
+    def _fill_availability(self) -> None:
+        if self._teacher is None or not self._current_calendar_id:
+            return
+        try:
+            unavailable = self._teachers_repo.get_teacher_unavailable_slots(
+                int(getattr(self._teacher, "id_teacher", 0)),
+                int(self._current_calendar_id),
+            )
+        except Exception:
+            unavailable = set()
+        odd_available = []
+        even_available = []
+        for (day, pair), checkbox in self.availability_odd_calendar._checkboxes.items():
+            if (1, day, pair) not in unavailable:
+                odd_available.append((day, pair))
+        for (day, pair), checkbox in self.availability_even_calendar._checkboxes.items():
+            if (2, day, pair) not in unavailable:
+                even_available.append((day, pair))
+        self.availability_odd_calendar.set_availability(odd_available)
+        self.availability_even_calendar.set_availability(even_available)
+
     def _select_all_subjects(self) -> None:
         for widgets in self._subject_rule_widgets.values():
             widgets["subject"].setChecked(True)
@@ -303,7 +366,7 @@ class TeacherEditDialog(QDialog):
         for widgets in self._subject_rule_widgets.values():
             widgets["subject"].setChecked(False)
 
-    def get_data(self) -> tuple[str, list[dict], list[tuple[int, int]]]:
+    def get_data(self) -> tuple[str, list[dict], list[tuple[int, int, int]], list[int]]:
         full_name = self.name_combo.currentText().strip()
         subject_rules: list[dict] = []
 
@@ -321,19 +384,23 @@ class TeacherEditDialog(QDialog):
             )
 
         # Получаем доступность из календаря
-        availability = self.availability_calendar.get_availability()
+        availability = []
+        availability.extend((1, day, pair) for day, pair in self.availability_odd_calendar.get_availability())
+        availability.extend((2, day, pair) for day, pair in self.availability_even_calendar.get_availability())
+        selected_group_ids = [gid for gid, checkbox in self._group_widgets.items() if checkbox.isChecked()]
 
-        return full_name, subject_rules, availability
+        return full_name, subject_rules, availability, selected_group_ids
 
 
 class TeachersPage(QWidget):
     calendarCreated = pyqtSignal(int)
 
-    def __init__(self, teachers_repo, subjects_repo, calendar_repo):
+    def __init__(self, teachers_repo, subjects_repo, calendar_repo, groups_repo=None):
         super().__init__()
         self._teachers_repo = teachers_repo
         self._subjects_repo = subjects_repo
         self._calendar_repo = calendar_repo
+        self._groups_repo = groups_repo
 
         self._current_calendar_id: Optional[int] = None
         self._all_rows: list[object] = []
@@ -518,17 +585,20 @@ class TeachersPage(QWidget):
     def _add_teacher(self) -> None:
         dlg = TeacherEditDialog(
             self,
+            teachers_repo=self._teachers_repo,
             subjects_repo=self._subjects_repo,
+            groups_repo=self._groups_repo,
             calendar_repo=self._calendar_repo,
             teacher=None,
             selected_subject_ids=[],
             selected_subject_rules={},
+            selected_group_ids=[],
             current_calendar_id=self._current_calendar_id,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        full_name, subject_rules, availability = dlg.get_data()
+        full_name, subject_rules, availability, selected_group_ids = dlg.get_data()
 
         if not full_name:
             QMessageBox.warning(self, "Ошибка", "ФИО не может быть пустым.")
@@ -572,12 +642,17 @@ class TeachersPage(QWidget):
                         int(existing_teacher.id_teacher),
                         merged_subject_rules,
                     )
+                    self._teachers_repo.replace_teacher_group_assignments(
+                        int(existing_teacher.id_teacher),
+                        selected_group_ids,
+                    )
 
                     if self._current_calendar_id and availability:
                         all_slots = set()
-                        for day in range(1, 7):
-                            for pair in range(1, 9):
-                                all_slots.add((day, pair))
+                        for week_type in (1, 2):
+                            for day in range(1, 7):
+                                for pair in range(1, 9):
+                                    all_slots.add((week_type, day, pair))
                         available_slots = set(availability)
                         unavailable_slots = all_slots - available_slots
                         self._teachers_repo.replace_teacher_availability_grid(
@@ -611,14 +686,19 @@ class TeachersPage(QWidget):
                 int(teacher_id),
                 subject_rules,
             )
+            self._teachers_repo.replace_teacher_group_assignments(
+                int(teacher_id),
+                selected_group_ids,
+            )
 
             # Сохраняем доступность преподавателя
             if self._current_calendar_id and availability:
                 # Преобразуем список доступных слотов в набор недоступных
                 all_slots = set()
-                for day in range(1, 7):  # Пн-Сб
-                    for pair in range(1, 9):  # 1-8 пар
-                        all_slots.add((day, pair))
+                for week_type in (1, 2):
+                    for day in range(1, 7):
+                        for pair in range(1, 9):
+                            all_slots.add((week_type, day, pair))
                 
                 available_slots = set(availability)
                 unavailable_slots = all_slots - available_slots
@@ -654,20 +734,24 @@ class TeachersPage(QWidget):
 
         selected_subject_ids = self._teachers_repo.get_teacher_subject_ids(int(teacher_id))
         selected_subject_rules = self._teachers_repo.get_teacher_subject_rules(int(teacher_id))
+        selected_group_ids = self._teachers_repo.get_teacher_group_ids(int(teacher_id))
 
         dlg = TeacherEditDialog(
             self,
+            teachers_repo=self._teachers_repo,
             subjects_repo=self._subjects_repo,
+            groups_repo=self._groups_repo,
             calendar_repo=self._calendar_repo,
             teacher=teacher,
             selected_subject_ids=selected_subject_ids,
             selected_subject_rules=selected_subject_rules,
+            selected_group_ids=selected_group_ids,
             current_calendar_id=self._current_calendar_id,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        full_name, subject_rules, availability = dlg.get_data()
+        full_name, subject_rules, availability, selected_group_ids = dlg.get_data()
 
         if not full_name:
             QMessageBox.warning(self, "Ошибка", "ФИО преподавателя не может быть пустым.")
@@ -686,14 +770,19 @@ class TeachersPage(QWidget):
                 int(teacher_id),
                 subject_rules,
             )
+            self._teachers_repo.replace_teacher_group_assignments(
+                int(teacher_id),
+                selected_group_ids,
+            )
             
             # Обновляем доступность преподавателя
             if self._current_calendar_id and availability:
                 # Преобразуем список доступных слотов в набор недоступных
                 all_slots = set()
-                for day in range(1, 7):  # Пн-Сб
-                    for pair in range(1, 9):  # 1-8 пар
-                        all_slots.add((day, pair))
+                for week_type in (1, 2):
+                    for day in range(1, 7):
+                        for pair in range(1, 9):
+                            all_slots.add((week_type, day, pair))
                 
                 available_slots = set(availability)
                 unavailable_slots = all_slots - available_slots

@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -35,14 +37,16 @@ class RoomEditDialog(QDialog):
 
     PRIORITY = ["lab", "computer", "lecture", "classroom"]
 
-    def __init__(self, parent, room: Optional[object] = None):
+    def __init__(self, parent, *, subjects_repo=None, selected_subject_ids: Optional[list[int]] = None, room: Optional[object] = None):
         super().__init__(parent)
         self._room = room
+        self._subjects_repo = subjects_repo
+        self._selected_subject_ids = set(selected_subject_ids or [])
 
         self.setWindowTitle(
             "Редактирование аудитории" if room is not None else "Добавление аудитории"
         )
-        self.resize(470, 280)
+        self.resize(560, 560)
 
         root = QVBoxLayout(self)
 
@@ -72,6 +76,10 @@ class RoomEditDialog(QDialog):
 
         form.addRow("Типы аудитории:", types_box)
 
+        self.subjects_list = QListWidget()
+        self.subjects_list.setMinimumHeight(180)
+        form.addRow("Закрепить за дисциплинами:", self.subjects_list)
+
         hint = QLabel(
             "Можно выбрать несколько типов одновременно.\n"
             "Приоритет специализации:\n"
@@ -97,7 +105,20 @@ class RoomEditDialog(QDialog):
             checkbox.toggled.connect(self._update_primary_type_preview)
 
         self._fill()
+        self._load_subjects()
         self._update_primary_type_preview()
+
+    def _load_subjects(self) -> None:
+        self.subjects_list.clear()
+        if self._subjects_repo is None:
+            return
+        for subject in self._subjects_repo.list_all():
+            subject_id = int(getattr(subject, "id_subject", 0) or 0)
+            item = QListWidgetItem(str(getattr(subject, "subject_name", "") or f"id={subject_id}"))
+            item.setData(Qt.ItemDataRole.UserRole, subject_id)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if subject_id in self._selected_subject_ids else Qt.CheckState.Unchecked)
+            self.subjects_list.addItem(item)
 
     def _fill(self) -> None:
         if self._room is None:
@@ -143,12 +164,17 @@ class RoomEditDialog(QDialog):
             f"Главный тип: {self._room_type_label(primary) if primary else '—'}"
         )
 
-    def get_data(self) -> tuple[str, str, list[str], int]:
+    def get_data(self) -> tuple[str, str, list[str], int, list[int]]:
         room_number = self.room_number_combo.currentText().strip()
         room_types = self._get_selected_room_types()
         primary_room_type = self._get_primary_room_type()
         capacity = int(self.capacity_spin.value())
-        return room_number, primary_room_type, room_types, capacity
+        subject_ids = []
+        for idx in range(self.subjects_list.count()):
+            item = self.subjects_list.item(idx)
+            if item.checkState() == Qt.CheckState.Checked:
+                subject_ids.append(int(item.data(Qt.ItemDataRole.UserRole)))
+        return room_number, primary_room_type, room_types, capacity, subject_ids
 
 
 class CreateCalendarDialog(QDialog):
@@ -207,10 +233,11 @@ class CreateCalendarDialog(QDialog):
 class RoomsPage(QWidget):
     calendarCreated = pyqtSignal(int)
 
-    def __init__(self, rooms_repo, calendar_repo):
+    def __init__(self, rooms_repo, calendar_repo, subjects_repo=None):
         super().__init__()
         self._rooms_repo = rooms_repo
         self._calendar_repo = calendar_repo
+        self._subjects_repo = subjects_repo
         self._current_calendar_id: Optional[int] = None
         self._all_rows: list[object] = []
         self._sort_column: Optional[int] = None
@@ -391,11 +418,11 @@ class RoomsPage(QWidget):
         return ", ".join(labels) if labels else "—"
 
     def _add_room(self) -> None:
-        dlg = RoomEditDialog(self)
+        dlg = RoomEditDialog(self, subjects_repo=self._subjects_repo)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        room_number, primary_room_type, room_types, capacity = dlg.get_data()
+        room_number, primary_room_type, room_types, capacity, subject_ids = dlg.get_data()
 
         if not room_number:
             QMessageBox.warning(
@@ -430,13 +457,14 @@ class RoomsPage(QWidget):
             return
 
         try:
-            self._rooms_repo.create(
+            room_id = self._rooms_repo.create(
                 room_number=room_number,
                 room_type=primary_room_type,
                 room_types=room_types,
                 capacity=int(capacity),
                 building=None,
             )
+            self._rooms_repo.replace_room_subject_assignments(int(room_id), subject_ids)
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -460,11 +488,17 @@ class RoomsPage(QWidget):
             self.refresh()
             return
 
-        dlg = RoomEditDialog(self, room=room)
+        selected_subject_ids = self._rooms_repo.get_room_subject_ids(int(room_id))
+        dlg = RoomEditDialog(
+            self,
+            subjects_repo=self._subjects_repo,
+            selected_subject_ids=selected_subject_ids,
+            room=room,
+        )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        room_number, primary_room_type, room_types, capacity = dlg.get_data()
+        room_number, primary_room_type, room_types, capacity, subject_ids = dlg.get_data()
 
         if not room_number:
             QMessageBox.warning(
@@ -507,6 +541,7 @@ class RoomsPage(QWidget):
                 capacity=int(capacity),
                 building=None,
             )
+            self._rooms_repo.replace_room_subject_assignments(int(room_id), subject_ids)
         except Exception as exc:
             QMessageBox.critical(
                 self,

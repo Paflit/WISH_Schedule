@@ -51,3 +51,11 @@ class SolverError(DomainError):
     - несовместимые ограничения
     """
     pass
+
+
+class SolverInfeasibleError(SolverError):
+    """Solver не нашёл решение, но вернул диагностические данные."""
+
+    def __init__(self, message: str, diagnostics: dict | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}

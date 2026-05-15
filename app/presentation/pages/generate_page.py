@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QProgressBar,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -22,9 +23,6 @@ from PyQt6.QtWidgets import (
     QWidget,
     QHeaderView,
 )
-
-from app.presentation.widgets.metrics_panel import MetricsPanel
-
 
 class CreateCalendarDialog(QDialog):
 
@@ -181,8 +179,12 @@ class GeneratePage(QWidget):
         self.status_label.setStyleSheet("font-weight: 500;")
         root.addWidget(self.status_label)
 
-        self.metrics_panel = MetricsPanel()
-        root.addWidget(self.metrics_panel)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Готово к запуску")
+        self.progress_bar.setTextVisible(True)
+        root.addWidget(self.progress_bar)
 
         variants_title = QLabel("Результат генерации")
         variants_title.setStyleSheet("font-size: 15px; font-weight: 600;")
@@ -396,9 +398,16 @@ class GeneratePage(QWidget):
             )
             return
 
+        report = self._build_feasibility_report(int(calendar_id))
+        if report is None:
+            return
+        if not self._confirm_generation_with_critical_issues(report):
+            return
+        self._ensure_placeholder_resources(report)
+
         self._current_variant_ids = []
         self._fill_variants_table([])
-        self.metrics_panel.set_metrics({})
+        self._reset_progress_bar(running=True)
 
         self.log_output.clear()
         self._append_log(
@@ -522,11 +531,14 @@ class GeneratePage(QWidget):
         msg_type = str(payload.get("type", "") or "").strip()
 
         if msg_type == "started":
+            if self.progress_bar.value() < 2:
+                self._update_progress_bar("worker_started", {})
             self._append_log(
                 "[worker] "
                 f"Запущен: calendar_id={payload.get('calendar_id')}, "
                 f"variants_count={payload.get('variants_count')}, "
-                f"time_limit={payload.get('time_limit_seconds')} сек"
+                f"time_limit={payload.get('time_limit_seconds')} сек, "
+                f"random_seed={payload.get('random_seed')}"
             )
             return
 
@@ -534,33 +546,19 @@ class GeneratePage(QWidget):
             stage = str(payload.get("stage", "") or "")
             data = payload.get("data", {}) or {}
             self._append_log(self._format_progress(stage, data))
+            if stage == "start" and self.progress_bar.value() >= 70:
+                self._set_progress_value(76, "Повторная генерация после автоисправлений")
+            self._update_progress_bar(stage, data)
             self._set_status(self._human_stage(stage))
             return
 
         if msg_type == "done":
+            self._set_progress_value(100, "Генерация завершена")
             variants = list(payload.get("variants", []) or [])
             self._current_variant_ids = [
                 int(v.get("id_variant", 0) or 0) for v in variants if int(v.get("id_variant", 0) or 0) > 0
             ]
             self._fill_variants_table(variants)
-
-            if variants:
-                best = min(
-                    variants,
-                    key=lambda x: int(x.get("objective_score", 0) or 0),
-                )
-                self.metrics_panel.set_metrics(
-                    {
-                        "variants_count": int(payload.get("variants_count", len(variants)) or len(variants)),
-                        "best_variant_id": int(best.get("id_variant", 0) or 0),
-                        "best_objective_score": int(best.get("objective_score", 0) or 0),
-                        "best_entries_count": int(best.get("entries_count", 0) or 0),
-                    }
-                )
-            else:
-                self.metrics_panel.set_metrics(
-                    {"variants_count": int(payload.get("variants_count", 0) or 0)}
-                )
 
             self._append_log(
                 f"[done] Найдено вариантов: {int(payload.get('variants_count', len(variants)) or len(variants))}"
@@ -574,6 +572,7 @@ class GeneratePage(QWidget):
             self._append_log(f"[error] {message}")
             if details:
                 self._append_log(details)
+            self.progress_bar.setFormat(f"Ошибка: {message}")
             self._set_status(message, error=True)
             return
 
@@ -641,6 +640,8 @@ class GeneratePage(QWidget):
         self.refresh_btn.setEnabled(not running)
         self.calendar_combo.setEnabled(not running)
         self.add_calendar_btn.setEnabled(not running)
+        if not running and self.progress_bar.value() == 0:
+            self.progress_bar.setFormat("Готово к запуску")
 
     def _set_status(self, text: str, error: bool = False) -> None:
         self.status_label.setText(text)
@@ -651,6 +652,43 @@ class GeneratePage(QWidget):
 
     def _append_log(self, text: str) -> None:
         self.log_output.appendPlainText(text)
+
+    def _reset_progress_bar(self, *, running: bool) -> None:
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Генерация запущена…" if running else "Готово к запуску")
+
+    def _set_progress_value(self, value: int, text: str) -> None:
+        clamped = max(0, min(100, int(value)))
+        self.progress_bar.setValue(clamped)
+        self.progress_bar.setFormat(text)
+
+    def _update_progress_bar(self, stage: str, data: dict) -> None:
+        current = int(self.progress_bar.value())
+        stage_progress = {
+            "worker_started": (2, "Процесс генерации запущен"),
+            "start": (5, "Подготовка генерации"),
+            "calendar_loaded": (10, "Календарь загружен"),
+            "semester_plans_loaded": (16, "Загружен semester plan"),
+            "weekly_plans_loaded": (20, "Загружен weekly plan"),
+            "weekly_plans_missing": (20, "Используется fallback semester plan"),
+            "reference_data_loaded": (28, "Загружены справочники"),
+            "curriculum_map_loaded": (34, "Загружены элементы учебного плана"),
+            "rules_loaded": (40, "Загружены правила"),
+            "availability_loaded": (46, "Загружена доступность преподавателей"),
+            "auto_placeholder_availability_repaired": (50, "Исправлена доступность автозаглушек"),
+            "building_events": (56, "Формирование событий генерации"),
+            "events_built": (64, "События генерации построены"),
+            "pre_solver_diagnostics": (72, "Выполнена преддиагностика"),
+            "auto_capacity_placeholders_added": (76, "Добавлены преподаватели по дефициту ресурса"),
+            "auto_placeholders_added": (78, "Добавлены адресные заглушки"),
+            "solver_started": (84, "Solver запущен"),
+            "solver_infeasible_diagnostics": (90, "Собрана диагностика несовместимости"),
+            "solver_finished": (94, "Solver завершил поиск"),
+            "saving_variant": (97, "Сохранение варианта"),
+            "variant_saved": (99, "Вариант сохранён"),
+        }
+        value, text = stage_progress.get(stage, (current, self._human_stage(stage)))
+        self._set_progress_value(max(current, int(value)), text)
 
     def _human_stage(self, stage: str) -> str:
         mapping = {
@@ -665,6 +703,7 @@ class GeneratePage(QWidget):
             "availability_loaded": "Загружена доступность преподавателей.",
             "building_events": "Формирование событий генерации…",
             "events_built": "События генерации построены.",
+            "auto_placeholders_added": "Добавлены заглушки для проблемных событий, повтор генерации…",
             "solver_started": "Solver запущен…",
             "solver_finished": "Solver завершил поиск.",
             "saving_variant": "Сохранение варианта…",
@@ -694,41 +733,10 @@ class GeneratePage(QWidget):
             return
 
         try:
-            from app.application.use_cases.validate_feasibility import ValidateFeasibilityUseCase
-            from app.infrastructure.db.repositories import (
-                SqliteCalendarRepository,
-                SqliteCurriculumRepository,
-                SqliteGroupsRepository,
-                SqliteSubjectsRepository,
-                SqliteTeachersRepository,
-                SqliteRoomsRepository,
-            )
-
-            session_factory = self._schedule_repo._session_factory
-
-            # Создаем репозитории
-            calendar_repo = SqliteCalendarRepository(session_factory)
-            curriculum_repo = SqliteCurriculumRepository(session_factory)
-            groups_repo = SqliteGroupsRepository(session_factory)
-            subjects_repo = SqliteSubjectsRepository(session_factory)
-            teachers_repo = SqliteTeachersRepository(session_factory)
-            rooms_repo = SqliteRoomsRepository(session_factory)
-
-            # Выполняем проверку
-            use_case = ValidateFeasibilityUseCase(
-                calendar_repo=calendar_repo,
-                curriculum_repo=curriculum_repo,
-                groups_repo=groups_repo,
-                subjects_repo=subjects_repo,
-                teachers_repo=teachers_repo,
-                rooms_repo=rooms_repo,
-                event_builder=self._event_builder,
-                config=self._config,
-                rules=self._rules,
-            )
-
             self._set_status("Проверка реализуемости...", error=False)
-            report = use_case.execute(int(calendar_id))
+            report = self._build_feasibility_report(int(calendar_id))
+            if report is None:
+                return
 
             # Формируем отчет
             message_parts = []
@@ -786,3 +794,187 @@ class GeneratePage(QWidget):
                 f"Не удалось выполнить проверку реализуемости:\n{exc}",
             )
             self._set_status(f"Ошибка проверки: {exc}", error=True)
+
+    def _build_feasibility_report(self, calendar_id: int):
+        from app.application.use_cases.validate_feasibility import ValidateFeasibilityUseCase
+        from app.infrastructure.db.repositories import (
+            SqliteCalendarRepository,
+            SqliteCurriculumRepository,
+            SqliteGroupsRepository,
+            SqliteSubjectsRepository,
+            SqliteTeachersRepository,
+            SqliteRoomsRepository,
+        )
+
+        session_factory = self._schedule_repo._session_factory
+        calendar_repo = SqliteCalendarRepository(session_factory)
+        curriculum_repo = SqliteCurriculumRepository(session_factory)
+        groups_repo = SqliteGroupsRepository(session_factory)
+        subjects_repo = SqliteSubjectsRepository(session_factory)
+        teachers_repo = SqliteTeachersRepository(session_factory)
+        rooms_repo = SqliteRoomsRepository(session_factory)
+
+        use_case = ValidateFeasibilityUseCase(
+            calendar_repo=calendar_repo,
+            curriculum_repo=curriculum_repo,
+            groups_repo=groups_repo,
+            subjects_repo=subjects_repo,
+            teachers_repo=teachers_repo,
+            rooms_repo=rooms_repo,
+            event_builder=self._event_builder,
+            config=self._config,
+            rules=self._rules,
+        )
+        return use_case.execute(int(calendar_id))
+
+    def _confirm_generation_with_critical_issues(self, report) -> bool:
+        critical_categories = {"teacher_coverage", "teacher_deficit", "room_coverage", "room_deficit", "bottleneck"}
+        relevant_issues = [
+            issue for issue in list(getattr(report, "critical_issues", []) or [])
+            if str(getattr(issue, "category", "") or "") in critical_categories
+        ]
+        if not relevant_issues:
+            return True
+
+        lines = [
+            "Обнаружены критические проблемы с обеспечением преподавателями или аудиториями.",
+            "Если вы запустите генерацию сейчас, некоторые данные останутся пустыми.",
+            "Хотите продолжить?",
+            "",
+            f"Критических проблем: {len(relevant_issues)}",
+        ]
+        for issue in relevant_issues[:8]:
+            lines.append(f"• {issue.message}")
+        if len(relevant_issues) > 8:
+            lines.append(f"• ... и ещё {len(relevant_issues) - 8}")
+
+        answer = QMessageBox.question(
+            self,
+            "Критические проблемы генерации",
+            "\n".join(lines),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _ensure_placeholder_resources(self, report) -> None:
+        teacher_created = self._ensure_placeholder_teachers(report)
+        room_created = self._ensure_placeholder_rooms(report)
+        if teacher_created or room_created:
+            self._append_log(
+                f"[info] Добавлены недостающие данные: преподавателей={teacher_created}, аудиторий={room_created}"
+            )
+
+    def _ensure_placeholder_teachers(self, report) -> int:
+        created_count = 0
+        teacher_issues = [
+            issue for issue in list(getattr(report, "critical_issues", []) or [])
+            if str(getattr(issue, "category", "") or "") == "teacher_coverage"
+        ]
+        if not teacher_issues:
+            return 0
+
+        for issue in teacher_issues:
+            details = getattr(issue, "details", {}) or {}
+            subject_id = int(details.get("subject_id", 0) or 0)
+            subject_name = str(details.get("subject_name", "") or f"ID={subject_id}")
+            part_type = str(details.get("part_type", "") or "practice")
+            if subject_id <= 0:
+                continue
+
+            base_name = f"Преподаватель {subject_name}"
+            full_name = self._unique_teacher_name(base_name)
+            teacher_id = self._create_placeholder_teacher(full_name, subject_id, part_type)
+            if teacher_id > 0:
+                created_count += 1
+        return created_count
+
+    def _ensure_placeholder_rooms(self, report) -> int:
+        room_types = []
+        for issue in list(getattr(report, "critical_issues", []) or []):
+            category = str(getattr(issue, "category", "") or "")
+            if category not in {"room_coverage", "room_deficit"}:
+                continue
+            details = getattr(issue, "details", {}) or {}
+            room_type = str(details.get("room_type", "") or "").strip().lower()
+            if room_type:
+                room_types.append(room_type)
+
+        created_count = 0
+        for room_type in sorted(set(room_types)):
+            if self._room_type_exists(room_type):
+                continue
+            room_number = self._unique_room_number(f"Аудитория для {room_type}")
+            self._rooms_repo_create_placeholder(room_number, room_type)
+            created_count += 1
+        return created_count
+
+    def _unique_teacher_name(self, base_name: str) -> str:
+        from app.infrastructure.db.repositories import SqliteTeachersRepository
+
+        repo = SqliteTeachersRepository(self._schedule_repo._session_factory)
+        idx = 1
+        while True:
+            candidate = f"{base_name}{idx}"
+            if repo.get_by_full_name(candidate) is None:
+                return candidate
+            idx += 1
+
+    def _create_placeholder_teacher(self, full_name: str, subject_id: int, part_type: str) -> int:
+        from app.infrastructure.db.repositories import SqliteTeachersRepository
+
+        repo = SqliteTeachersRepository(self._schedule_repo._session_factory)
+        teacher_id = repo.create(
+            full_name=full_name,
+            hard_max=6,
+            soft_max=4,
+            needs_method_day=False,
+            commentary="Автоматически добавлен при генерации из-за нехватки преподавателей.",
+        )
+        repo.replace_teacher_subject_rules(
+            int(teacher_id),
+            [
+                {
+                    "subject_id": int(subject_id),
+                    "can_lecture": part_type == "lecture",
+                    "can_practice": part_type == "practice",
+                    "can_computer_practice": part_type == "computer_practice",
+                    "can_lab": part_type == "lab",
+                }
+            ],
+        )
+        return int(teacher_id)
+
+    def _room_type_exists(self, room_type: str) -> bool:
+        from app.infrastructure.db.repositories import SqliteRoomsRepository
+
+        repo = SqliteRoomsRepository(self._schedule_repo._session_factory)
+        for room in repo.list_all():
+            room_types = getattr(room, "room_types", None) or (getattr(room, "room_type", ""),)
+            if str(room_type).lower() in {str(x).lower() for x in room_types if str(x).strip()}:
+                return True
+        return False
+
+    def _unique_room_number(self, base_name: str) -> str:
+        from app.infrastructure.db.repositories import SqliteRoomsRepository
+
+        repo = SqliteRoomsRepository(self._schedule_repo._session_factory)
+        existing = {str(getattr(room, "room_number", "") or "") for room in repo.list_all()}
+        idx = 1
+        while True:
+            candidate = f"{base_name} {idx}"
+            if candidate not in existing:
+                return candidate
+            idx += 1
+
+    def _rooms_repo_create_placeholder(self, room_number: str, room_type: str) -> None:
+        from app.infrastructure.db.repositories import SqliteRoomsRepository
+
+        repo = SqliteRoomsRepository(self._schedule_repo._session_factory)
+        repo.create(
+            room_number=room_number,
+            room_type=room_type,
+            room_types=[room_type],
+            capacity=35,
+            building="Автозаглушка",
+        )

@@ -23,13 +23,15 @@ def _emit_progress(stage: str, data: dict) -> None:
     )
 
 
-def _emit_error(message: str, *, details: str | None = None) -> None:
+def _emit_error(message: str, *, details: str | None = None, diagnostics: dict | None = None) -> None:
     payload = {
         "type": "error",
         "message": str(message),
     }
     if details:
         payload["details"] = str(details)
+    if diagnostics:
+        payload["diagnostics"] = diagnostics
     _emit(payload)
 
 
@@ -82,6 +84,7 @@ def _parse_args(argv: list[str]) -> GenerateScheduleCommand:
     use_draft_as_locks = False
     base_variant_id = None
     use_base_variant_as_locks = False
+    random_seed = None
 
     idx = 4
     while idx < len(argv):
@@ -112,6 +115,15 @@ def _parse_args(argv: list[str]) -> GenerateScheduleCommand:
             use_base_variant_as_locks = True
             idx += 1
             continue
+        if token == "--random-seed":
+            if idx + 1 >= len(argv):
+                raise ValueError("После --random-seed должно идти целое число.")
+            try:
+                random_seed = int(argv[idx + 1])
+            except ValueError as exc:
+                raise ValueError("random_seed должен быть целым числом.") from exc
+            idx += 2
+            continue
         raise ValueError(f"Неизвестный аргумент: {token}")
 
     return GenerateScheduleCommand(
@@ -122,6 +134,7 @@ def _parse_args(argv: list[str]) -> GenerateScheduleCommand:
         use_draft_as_locks=use_draft_as_locks,
         base_variant_id=base_variant_id,
         use_base_variant_as_locks=use_base_variant_as_locks,
+        random_seed=random_seed,
     )
 
 
@@ -145,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                 "use_draft_as_locks": bool(command.use_draft_as_locks),
                 "base_variant_id": int(command.base_variant_id) if command.base_variant_id else None,
                 "use_base_variant_as_locks": bool(command.use_base_variant_as_locks),
+                "random_seed": int(command.random_seed) if command.random_seed else None,
             }
         )
 
@@ -163,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         _emit_error(
             str(exc),
             details=traceback.format_exc(),
+            diagnostics=getattr(exc, "diagnostics", None),
         )
         return 1
 

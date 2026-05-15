@@ -49,7 +49,7 @@ class DraftEntryDialog(QDialog):
     ):
         super().__init__(parent)
         self._available_events = list(available_events or [])
-        self._selectable_events = self._deduplicate_events(self._available_events)
+        self._selectable_events = list(self._available_events)
         self._teachers_repo = teachers_repo
         self._teacher_part_matrix = teacher_part_matrix
         self._rooms_repo = rooms_repo
@@ -107,25 +107,6 @@ class DraftEntryDialog(QDialog):
         self._load_teachers()
         self._load_rooms()
         self._fill_current()
-
-    def _deduplicate_events(self, events: list[object]) -> list[object]:
-        unique_events: list[object] = []
-        seen_keys: set[tuple[int, str, str, int, int]] = set()
-
-        for event in events or []:
-            key = (
-                int(getattr(event, "subject_id", 0) or 0),
-                str(getattr(event, "part_type", "") or "").strip().lower(),
-                str(getattr(event, "required_room_type", "") or "").strip().lower(),
-                int(getattr(event, "fixed_week_type", 0) or 0),
-                int(getattr(event, "group_id", 0) or 0),
-            )
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            unique_events.append(event)
-
-        return unique_events
 
     def _load_events(self) -> None:
         self.event_combo.clear()
@@ -616,18 +597,11 @@ class DraftsPage(QWidget):
     def _events_for_group_week(self, group_id: int, week_type: int) -> list[object]:
         subjects_by_id = {int(getattr(s, "id_subject", 0) or 0): s for s in self._subjects_repo.list_all()}
         draft_id = self._selected_draft_id()
-        used_event_ids: set[int] = set()
-        if draft_id is not None:
-            for draft_entry in self._schedule_repo.list_generation_draft_entries(int(draft_id)) or []:
-                used_event_ids.add(int(getattr(draft_entry, "event_id", 0) or 0))
-
         events = []
         for event in self._events:
             if int(getattr(event, "group_id", 0) or 0) != int(group_id):
                 continue
             if int(getattr(event, "fixed_week_type", 0) or 0) != int(week_type):
-                continue
-            if int(getattr(event, "id_event", 0) or 0) in used_event_ids:
                 continue
             subject_id = int(getattr(event, "subject_id", 0) or 0)
             subject = subjects_by_id.get(subject_id)
@@ -663,6 +637,8 @@ class DraftsPage(QWidget):
                 "Для выбранной группы и недели все допустимые занятия уже размещены в черновике."
             )
             return
+
+        current_entry_id = int(getattr(current_entry, "id_draft_entry", 0) or 0) if current_entry is not None else None
 
         dlg = DraftEntryDialog(
             self,
@@ -702,6 +678,7 @@ class DraftsPage(QWidget):
                 room_id=int(result["room_id"]) if result.get("room_id") is not None else None,
                 current_draft_entry_id=int(getattr(current_entry, "id_draft_entry", 0) or 0) if current_entry is not None else None,
             )
+            over_hours = self._event_usage_exceeds_plan(int(draft_id), int(event_id), current_entry_id)
         except Exception as exc:
             QMessageBox.warning(self, "Конфликт черновика", str(exc))
             return
@@ -712,9 +689,43 @@ class DraftsPage(QWidget):
             slot_id=int(result["slot_id"]),
             teacher_id=int(result["teacher_id"]) if result.get("teacher_id") is not None else None,
             room_id=int(result["room_id"]) if result.get("room_id") is not None else None,
-            comment=None,
+            comment="manual_over_hours" if over_hours else None,
+            draft_entry_id=current_entry_id,
         )
         self._render_grid()
+
+    def _event_usage_exceeds_plan(self, draft_id: int, event_id: int, current_entry_id: Optional[int]) -> bool:
+        event = self._events_by_id.get(int(event_id))
+        if event is None:
+            return False
+        key = self._event_plan_key(event)
+        planned_count = sum(1 for e in self._events if self._event_plan_key(e) == key)
+        used_count = 1
+        for entry in self._schedule_repo.list_generation_draft_entries(int(draft_id)) or []:
+            entry_id = int(getattr(entry, "id_draft_entry", 0) or 0)
+            if current_entry_id is not None and entry_id == int(current_entry_id):
+                continue
+            used_event = self._events_by_id.get(int(getattr(entry, "event_id", 0) or 0))
+            if used_event is not None and self._event_plan_key(used_event) == key:
+                used_count += 1
+        if planned_count > 0 and used_count > planned_count:
+            answer = QMessageBox.question(
+                self,
+                "Превышение академических часов",
+                "Выбранная дисциплина в черновике превышает рассчитанное количество академических часов. Хотите продолжить?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                raise ValueError("Добавление отменено: превышение академических часов.")
+            return True
+        return False
+
+    def _event_plan_key(self, event) -> tuple:
+        return (
+            int(getattr(event, "group_id", 0) or 0),
+            int(getattr(event, "subject_id", 0) or 0),
+            str(getattr(event, "part_type", "") or ""),
+            int(getattr(event, "fixed_week_type", 0) or 0),
+        )
 
     def _create_draft(self) -> None:
         calendar_id = self._selected_calendar_id()

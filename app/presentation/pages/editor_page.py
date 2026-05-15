@@ -28,7 +28,6 @@ from PyQt6.QtWidgets import (
 
 from app.presentation.viewmodels.editor_vm import EditorCellItem, EditorViewModel
 from app.presentation.pages.drafts_page import DraftEntryDialog
-from app.presentation.widgets.metrics_panel import MetricsPanel
 
 
 DAY_NAMES = {
@@ -513,9 +512,6 @@ class EditorPage(QWidget):
         self.selector_title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
         right_layout.addWidget(self.selector_title_label)
 
-        self.selector_metrics_panel = MetricsPanel()
-        right_layout.addWidget(self.selector_metrics_panel)
-
         right_layout.addWidget(QLabel("Краткая сводка варианта:"))
         self.selector_summary_list = QListWidget()
         right_layout.addWidget(self.selector_summary_list, 1)
@@ -572,9 +568,6 @@ class EditorPage(QWidget):
         self.info_label = QLabel("Выберите вариант расписания.")
         self.info_label.setWordWrap(True)
         self.info_label.hide()
-
-        self.metrics_panel = MetricsPanel()
-        self.metrics_panel.hide()
 
         self.entries_list = QListWidget()
         self.entries_list.hide()
@@ -634,7 +627,6 @@ class EditorPage(QWidget):
         self.selector_open_btn.setEnabled(False)
         self.selector_title_label.setText("Вариант не выбран.")
         self.selector_summary_list.clear()
-        self.selector_metrics_panel.set_metrics({})
         calendar_id = self.calendar_combo.currentData()
 
         try:
@@ -696,17 +688,6 @@ class EditorPage(QWidget):
             f"{dto.name}<br><span style='font-size:12px; color:#667085;'>"
             f"id={int(dto.id_variant)}, записей: {len(entries)}</span>"
         )
-        self.selector_metrics_panel.set_metrics(
-            {
-                "objective_score": int(getattr(dto, "objective_score", 0) or 0),
-                "entries_count": len(entries),
-                "groups_count": len({int(e.group_id) for e in entries if int(e.group_id) > 0}),
-                "teachers_count": len({int(e.teacher_id) for e in entries if int(e.teacher_id) > 0}),
-                "rooms_count": len({int(e.room_id) for e in entries if int(e.room_id) > 0}),
-                "locked_entries": len([e for e in entries if bool(e.is_locked)]),
-            }
-        )
-
         self.selector_summary_list.clear()
         for text in self._build_preview_rows(dto):
             self.selector_summary_list.addItem(QListWidgetItem(text))
@@ -776,17 +757,6 @@ class EditorPage(QWidget):
     def _on_variant_loaded(self, variant) -> None:
         self._current_entry_id = None
         self.selected_title.setText("Запись не выбрана.")
-        entries = list(variant.entries or [])
-        self.metrics_panel.set_metrics(
-            {
-                "objective_score": int(getattr(variant, "objective_score", 0) or 0),
-                "entries_count": len(entries),
-                "groups_count": len({int(e.group_id) for e in entries if int(e.group_id) > 0}),
-                "teachers_count": len({int(e.teacher_id) for e in entries if int(e.teacher_id) > 0}),
-                "rooms_count": len({int(e.room_id) for e in entries if int(e.room_id) > 0}),
-                "locked_entries": len([e for e in entries if bool(e.is_locked)]),
-            }
-        )
         self._rebuild_entity_filter(variant)
         self._render_variant(variant)
         self._show_detail_page()

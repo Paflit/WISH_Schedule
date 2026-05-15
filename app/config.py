@@ -69,7 +69,8 @@ class AppConfig:
         import_dir.mkdir(parents=True, exist_ok=True)
 
         db_filename = os.getenv("APP_DB_FILENAME", DEFAULT_DB_FILENAME)
-        db_path = data_dir / db_filename
+        selected_db_path = os.getenv("APP_DB_PATH")
+        db_path = Path(selected_db_path) if selected_db_path else data_dir / db_filename
 
         db_url = os.getenv("APP_DB_URL", f"sqlite:///{db_path}")
 

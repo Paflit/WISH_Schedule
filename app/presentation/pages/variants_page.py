@@ -25,7 +25,6 @@ from PyQt6.QtWidgets import (
 )
 
 from app.application.dto.schedule_dto import ScheduleVariantDTO
-from app.presentation.widgets.metrics_panel import MetricsPanel
 
 
 DAY_NAMES = {
@@ -184,9 +183,6 @@ class VariantsPage(QWidget):
         self.title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
         right_layout.addWidget(self.title_label)
 
-        self.metrics_panel = MetricsPanel()
-        right_layout.addWidget(self.metrics_panel)
-
         right_layout.addWidget(QLabel("Краткая сводка записей варианта"))
 
         self.summary_list = QListWidget()
@@ -316,7 +312,6 @@ class VariantsPage(QWidget):
         self.open_btn.setEnabled(False)
         self.title_label.setText("Вариант не выбран.")
         self.summary_list.clear()
-        self.metrics_panel.set_metrics({})
 
         try:
             variants = self._schedule_repo.list_variants(calendar_id=self._current_calendar_id)
@@ -359,7 +354,6 @@ class VariantsPage(QWidget):
             self.open_btn.setEnabled(False)
             self.title_label.setText("Вариант не выбран.")
             self.summary_list.clear()
-            self.metrics_panel.set_metrics({})
             return
 
         try:
@@ -381,9 +375,6 @@ class VariantsPage(QWidget):
             f"id={int(dto.id_variant)}, записей: {len(dto.entries)}</span>"
         )
 
-        metrics = self._build_metrics(dto)
-        self.metrics_panel.set_metrics(metrics)
-
         self.summary_list.clear()
         summary_rows = self._build_summary_rows(dto)
         for text in summary_rows:
@@ -393,24 +384,6 @@ class VariantsPage(QWidget):
             f"Выбран вариант '{dto.name}', записей: {len(dto.entries)}, "
             f"score: {int(dto.objective_score)}"
         )
-
-    def _build_metrics(self, dto: ScheduleVariantDTO) -> dict:
-        entries = list(dto.entries or [])
-
-        unique_groups = len({int(e.group_id) for e in entries if int(e.group_id) > 0})
-        unique_teachers = len({int(e.teacher_id) for e in entries if int(e.teacher_id) > 0})
-        unique_rooms = len({int(e.room_id) for e in entries if int(e.room_id) > 0})
-        locked_entries = len([e for e in entries if bool(e.is_locked)])
-
-        return {
-            "id_variant": int(dto.id_variant),
-            "objective_score": int(dto.objective_score),
-            "entries_count": len(entries),
-            "groups_count": unique_groups,
-            "teachers_count": unique_teachers,
-            "rooms_count": unique_rooms,
-            "locked_entries": locked_entries,
-        }
 
     def _build_summary_rows(self, dto: ScheduleVariantDTO) -> list[str]:
         entries = sorted(

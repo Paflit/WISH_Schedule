@@ -377,6 +377,49 @@ class SqliteTeachersRepository:
             result[(tid, sid, "lab")] = bool(r["can_lab"])
         return result
 
+    def get_teacher_group_assignments(self) -> Dict[int, set[int]]:
+        with self._session_factory() as conn:
+            rows = conn.execute(
+                """
+                SELECT teacher_id, group_id
+                FROM TeacherGroupAssignments
+                """
+            ).fetchall()
+
+        result: Dict[int, set[int]] = {}
+        for teacher_id, group_id in rows:
+            result.setdefault(int(teacher_id), set()).add(int(group_id))
+        return result
+
+    def get_teacher_group_ids(self, teacher_id: int) -> list[int]:
+        with self._session_factory() as conn:
+            rows = conn.execute(
+                """
+                SELECT group_id
+                FROM TeacherGroupAssignments
+                WHERE teacher_id=?
+                ORDER BY group_id
+                """,
+                (int(teacher_id),),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def replace_teacher_group_assignments(self, teacher_id: int, group_ids: list[int]) -> None:
+        with self._session_factory() as conn:
+            conn.execute(
+                "DELETE FROM TeacherGroupAssignments WHERE teacher_id=?",
+                (int(teacher_id),),
+            )
+            for group_id in sorted({int(x) for x in group_ids if int(x) > 0}):
+                conn.execute(
+                    """
+                    INSERT INTO TeacherGroupAssignments(teacher_id, group_id)
+                    VALUES (?, ?)
+                    """,
+                    (int(teacher_id), int(group_id)),
+                )
+            conn.commit()
+
     def get_availability_matrix(self, calendar_id: int) -> Dict[Tuple[int, int], bool]:
         with self._session_factory() as conn:
             rows = conn.execute(
@@ -459,28 +502,35 @@ class SqliteTeachersRepository:
             )
         return result
 
-    def get_teacher_unavailable_slots(self, teacher_id: int, calendar_id: int) -> set[tuple[int, int]]:
+    def get_teacher_unavailable_slots(self, teacher_id: int, calendar_id: int) -> set[tuple[int, int, int]]:
         with self._session_factory() as conn:
             rows = conn.execute(
                 """
-                SELECT ts.day_of_week, ts.pair_number
+                SELECT sw.week_type, ts.day_of_week, ts.pair_number
                 FROM TeacherAvailability ta
                 JOIN TimeSlots ts ON ts.id_slot = ta.slot_id
                 JOIN SemesterWeeks sw ON sw.id_week = ts.week_id
                 WHERE ta.teacher_id=? AND ta.calendar_id=? AND ta.is_available=0
-                GROUP BY ts.day_of_week, ts.pair_number
+                GROUP BY sw.week_type, ts.day_of_week, ts.pair_number
                 """,
                 (int(teacher_id), int(calendar_id)),
             ).fetchall()
 
-        return {(int(r[0]), int(r[1])) for r in rows}
+        return {(int(r[0]), int(r[1]), int(r[2])) for r in rows}
 
     def replace_teacher_availability_grid(
         self,
         teacher_id: int,
         calendar_id: int,
-        unavailable_cells: set[tuple[int, int]],
+        unavailable_cells: set[tuple[int, ...]],
     ) -> None:
+        normalized_unavailable = set()
+        for cell in unavailable_cells:
+            if len(cell) == 3:
+                normalized_unavailable.add((int(cell[0]), int(cell[1]), int(cell[2])))
+            elif len(cell) == 2:
+                normalized_unavailable.add((0, int(cell[0]), int(cell[1])))
+
         with self._session_factory() as conn:
             conn.execute(
                 """
@@ -492,17 +542,19 @@ class SqliteTeachersRepository:
 
             slots = conn.execute(
                 """
-                SELECT ts.id_slot, ts.day_of_week, ts.pair_number
+                SELECT ts.id_slot, sw.week_type, ts.day_of_week, ts.pair_number
                 FROM TimeSlots ts
                 JOIN SemesterWeeks sw ON sw.id_week = ts.week_id
                 WHERE sw.calendar_id=?
-                GROUP BY ts.id_slot, ts.day_of_week, ts.pair_number
+                GROUP BY ts.id_slot, sw.week_type, ts.day_of_week, ts.pair_number
                 """,
                 (int(calendar_id),),
             ).fetchall()
 
-            for slot_id, day_of_week, pair_number in slots:
-                is_available = 0 if (int(day_of_week), int(pair_number)) in unavailable_cells else 1
+            for slot_id, week_type, day_of_week, pair_number in slots:
+                cell = (int(week_type), int(day_of_week), int(pair_number))
+                legacy_cell = (0, int(day_of_week), int(pair_number))
+                is_available = 0 if cell in normalized_unavailable or legacy_cell in normalized_unavailable else 1
                 conn.execute(
                     """
                     INSERT INTO TeacherAvailability(
@@ -817,6 +869,48 @@ class SqliteRoomsRepository:
         with self._session_factory() as conn:
             conn.execute("DELETE FROM Classes WHERE id_class=?", (int(id_room),))
             conn.commit()
+
+    def get_room_subject_ids(self, room_id: int) -> list[int]:
+        with self._session_factory() as conn:
+            rows = conn.execute(
+                """
+                SELECT subject_id
+                FROM RoomSubjectAssignments
+                WHERE room_id=?
+                ORDER BY subject_id
+                """,
+                (int(room_id),),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def replace_room_subject_assignments(self, room_id: int, subject_ids: list[int]) -> None:
+        with self._session_factory() as conn:
+            conn.execute(
+                "DELETE FROM RoomSubjectAssignments WHERE room_id=?",
+                (int(room_id),),
+            )
+            for subject_id in sorted({int(x) for x in subject_ids if int(x) > 0}):
+                conn.execute(
+                    """
+                    INSERT INTO RoomSubjectAssignments(room_id, subject_id)
+                    VALUES (?, ?)
+                    """,
+                    (int(room_id), int(subject_id)),
+                )
+            conn.commit()
+
+    def get_room_subject_assignments(self) -> Dict[int, set[int]]:
+        with self._session_factory() as conn:
+            rows = conn.execute(
+                """
+                SELECT room_id, subject_id
+                FROM RoomSubjectAssignments
+                """
+            ).fetchall()
+        result: Dict[int, set[int]] = {}
+        for room_id, subject_id in rows:
+            result.setdefault(int(room_id), set()).add(int(subject_id))
+        return result
 
     def _parse_room_types(self, row: dict) -> list[str]:
         raw_json = row.get("room_types_json")
@@ -1679,19 +1773,10 @@ class SqliteScheduleRepository:
         teacher_id: int | None = None,
         room_id: int | None = None,
         comment: str | None = None,
+        draft_entry_id: int | None = None,
     ) -> int:
         with self._session_factory() as conn:
-            row = conn.execute(
-                """
-                SELECT id_draft_entry
-                FROM GenerationDraftEntries
-                WHERE draft_id=? AND event_id=?
-                """,
-                (int(draft_id), int(event_id)),
-            ).fetchone()
-
-            if row:
-                draft_entry_id = int(row[0])
+            if draft_entry_id is not None:
                 conn.execute(
                     """
                     UPDATE GenerationDraftEntries
@@ -1707,7 +1792,7 @@ class SqliteScheduleRepository:
                     ),
                 )
                 conn.commit()
-                return draft_entry_id
+                return int(draft_entry_id)
 
             cur = conn.execute(
                 """
@@ -1894,9 +1979,9 @@ class SqliteScheduleRepository:
                             int(entry.event_id),
                             int(entry.slot_id),
                             int(group_id) if int(group_id) > 0 else None,
-                            int(entry.teacher_id),
+                            int(entry.teacher_id) if entry.teacher_id is not None else None,
                             int(curriculum_id),
-                            int(entry.room_id),
+                            int(entry.room_id) if entry.room_id is not None else None,
                             json.dumps({"event_id": int(entry.event_id)}, ensure_ascii=False),
                         ),
                     )
@@ -1933,8 +2018,8 @@ class SqliteScheduleRepository:
             JOIN TimeSlots ts ON ts.id_slot = se.slot_id
             JOIN SemesterWeeks sw ON sw.id_week = ts.week_id
             LEFT JOIN StudentGroups sg ON sg.id_group = se.group_id
-            JOIN Teachers t ON t.id_teacher = se.teacher_id
-            JOIN Classes c ON c.id_class = se.room_id
+            LEFT JOIN Teachers t ON t.id_teacher = se.teacher_id
+            LEFT JOIN Classes c ON c.id_class = se.room_id
             JOIN CurriculumItems ci ON ci.id_curriculum = se.curriculum_id
             JOIN Subjects s ON s.id_subject = ci.subject_id
         """
@@ -2240,9 +2325,9 @@ class SqliteScheduleRepository:
                 (
                     int(entry.slot_id),
                     int(entry.group_id) if int(entry.group_id) > 0 else None,
-                    int(entry.teacher_id),
+                    int(entry.teacher_id) if int(entry.teacher_id) > 0 else None,
                     int(entry.curriculum_id),
-                    int(entry.room_id),
+                    int(entry.room_id) if int(entry.room_id) > 0 else None,
                     _bool_to_int(entry.is_locked),
                     json.dumps({"event_id": int(entry.event_id)}, ensure_ascii=False),
                     int(entry.event_id),
@@ -2274,9 +2359,9 @@ class SqliteScheduleRepository:
                     int(entry.event_id),
                     int(entry.slot_id),
                     int(entry.group_id) if int(entry.group_id) > 0 else None,
-                    int(entry.teacher_id),
+                    int(entry.teacher_id) if int(entry.teacher_id) > 0 else None,
                     int(entry.curriculum_id),
-                    int(entry.room_id),
+                    int(entry.room_id) if int(entry.room_id) > 0 else None,
                     _bool_to_int(entry.is_locked),
                     json.dumps({"event_id": int(entry.event_id)}, ensure_ascii=False),
                 ),
