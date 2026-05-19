@@ -193,7 +193,7 @@ CREATE TABLE IF NOT EXISTS ScheduleEntries (
     event_id INTEGER,
     slot_id INTEGER NOT NULL,
     group_id INTEGER,
-    teacher_id INTEGER NOT NULL,
+    teacher_id INTEGER,
     curriculum_id INTEGER NOT NULL,
     room_id INTEGER,
     is_locked INTEGER NOT NULL DEFAULT 0,

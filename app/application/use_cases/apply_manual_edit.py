@@ -24,6 +24,7 @@ class ApplyManualEditCommand:
     new_teacher_id: Optional[int] = None
     new_room_id: Optional[int] = None
     new_group_id: Optional[int] = None
+    new_curriculum_id: Optional[int] = None
 
     edited_by: str = "manual_editor"
     comment: Optional[str] = None
@@ -42,6 +43,8 @@ class ApplyManualEditCommand:
             raise ValidationError("new_room_id должен быть положительным числом.")
         if self.new_group_id is not None and int(self.new_group_id) <= 0:
             raise ValidationError("new_group_id должен быть положительным числом.")
+        if self.new_curriculum_id is not None and int(self.new_curriculum_id) <= 0:
+            raise ValidationError("new_curriculum_id должен быть положительным числом.")
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,34 @@ class ApplyManualEditUseCase:
         room = self._rooms_repo.get_by_id(room_id)
         return getattr(room, "room_number", fallback) if room is not None else fallback
 
+    def _resolve_curriculum_metadata(
+        self,
+        curriculum_id: int,
+        fallback_subject_id: int,
+        fallback_subject_name: str,
+        fallback_part_type: str,
+    ) -> tuple[int, str, str]:
+        getter = getattr(self._schedule_repo, "get_curriculum", None)
+        if getter is None:
+            return fallback_subject_id, fallback_subject_name, fallback_part_type
+        curriculum = getter(int(curriculum_id))
+        if curriculum is None:
+            return fallback_subject_id, fallback_subject_name, fallback_part_type
+
+        subject_id = self._positive_int(getattr(curriculum, "subject_id", 0), fallback_subject_id)
+        part_type = str(getattr(curriculum, "part_type", fallback_part_type) or fallback_part_type)
+        subject_name = fallback_subject_name
+        session_factory = getattr(self._schedule_repo, "_session_factory", None)
+        if subject_id > 0 and session_factory is not None:
+            with session_factory() as conn:
+                row = conn.execute(
+                    "SELECT subject_name FROM Subjects WHERE id_subject=?",
+                    (int(subject_id),),
+                ).fetchone()
+            if row is not None:
+                subject_name = str(row[0] or subject_name)
+        return subject_id, subject_name, part_type
+
     def _build_updated_entry(
         self,
         original: ScheduleEntryDTO,
@@ -173,9 +204,25 @@ class ApplyManualEditUseCase:
             if command.new_group_id is not None
             else int(original.group_id)
         )
+        new_curriculum_id = (
+            int(command.new_curriculum_id)
+            if command.new_curriculum_id is not None
+            else int(original.curriculum_id)
+        )
+        subject_id, subject_name, part_type = self._resolve_curriculum_metadata(
+            new_curriculum_id,
+            int(original.subject_id),
+            str(original.subject_name),
+            str(original.part_type),
+        )
 
         return replace(
             original,
+            curriculum_id=new_curriculum_id,
+            event_id=0 if new_curriculum_id != int(original.curriculum_id) else int(original.event_id),
+            subject_id=subject_id,
+            subject_name=subject_name,
+            part_type=part_type,
             slot_id=new_slot_id,
             teacher_id=new_teacher_id,
             teacher_name=self._resolve_teacher_name(new_teacher_id, original.teacher_name),
@@ -208,6 +255,14 @@ class ApplyManualEditUseCase:
             raise ValidationError("Не указана корректная аудитория.")
         if int(after.group_id) <= 0:
             raise ValidationError("Не указана корректная группа.")
+
+        if int(after.curriculum_id) != int(before.curriculum_id):
+            getter = getattr(self._schedule_repo, "get_curriculum", None)
+            curriculum = getter(int(after.curriculum_id)) if getter is not None else None
+            if curriculum is None:
+                raise ValidationError("Выбранная дисциплина учебного плана не найдена.")
+            if int(getattr(curriculum, "group_id", 0) or 0) != int(after.group_id):
+                raise ValidationError("Выбранная дисциплина не относится к текущей группе.")
 
     def _validate_conflicts(self, entry: ScheduleEntryDTO) -> None:
         variant_id = int(entry.variant_id)
@@ -288,6 +343,7 @@ class ApplyManualEditUseCase:
             "teacher_id",
             "room_id",
             "group_id",
+            "curriculum_id",
             "is_locked",
         )
         return any(getattr(before, f) != getattr(after, f) for f in tracked_fields)

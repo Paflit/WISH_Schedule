@@ -594,11 +594,29 @@ class DraftsPage(QWidget):
                     )
                 self.grid_layout.addWidget(cell, row_idx, col_idx)
 
-    def _events_for_group_week(self, group_id: int, week_type: int) -> list[object]:
+    def _events_for_group_week(
+        self,
+        group_id: int,
+        week_type: int,
+        current_draft_entry_id: Optional[int] = None,
+    ) -> list[object]:
         subjects_by_id = {int(getattr(s, "id_subject", 0) or 0): s for s in self._subjects_repo.list_all()}
         draft_id = self._selected_draft_id()
+        used_event_ids: set[int] = set()
+        if draft_id is not None:
+            for entry in self._schedule_repo.list_generation_draft_entries(int(draft_id)) or []:
+                entry_id = int(getattr(entry, "id_draft_entry", 0) or 0)
+                if current_draft_entry_id is not None and entry_id == int(current_draft_entry_id):
+                    continue
+                used_event_id = int(getattr(entry, "event_id", 0) or 0)
+                if used_event_id > 0:
+                    used_event_ids.add(used_event_id)
+
         events = []
         for event in self._events:
+            event_id = int(getattr(event, "id_event", 0) or 0)
+            if event_id in used_event_ids:
+                continue
             if int(getattr(event, "group_id", 0) or 0) != int(group_id):
                 continue
             if int(getattr(event, "fixed_week_type", 0) or 0) != int(week_type):
@@ -625,7 +643,12 @@ class DraftsPage(QWidget):
         current_event = payload.event if payload is not None else None
         slot_label = f"{DAY_NAMES.get(int(day), str(day))}, {int(pair)} пара, неделя {int(week_type)}"
 
-        available_events = self._events_for_group_week(int(group_id), int(week_type))
+        current_entry_id = int(getattr(current_entry, "id_draft_entry", 0) or 0) if current_entry is not None else None
+        available_events = self._events_for_group_week(
+            int(group_id),
+            int(week_type),
+            current_draft_entry_id=current_entry_id,
+        )
         if current_event is not None:
             available_events.append(current_event)
             available_events.sort(key=lambda e: (str(getattr(e, "subject_name", "") or ""), str(getattr(e, "part_type", "") or ""), int(getattr(e, "id_event", 0) or 0)))
@@ -637,8 +660,6 @@ class DraftsPage(QWidget):
                 "Для выбранной группы и недели все допустимые занятия уже размещены в черновике."
             )
             return
-
-        current_entry_id = int(getattr(current_entry, "id_draft_entry", 0) or 0) if current_entry is not None else None
 
         dlg = DraftEntryDialog(
             self,

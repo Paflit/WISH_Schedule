@@ -50,7 +50,7 @@ class EntryEditDialog(QDialog):
 
         self.setWindowTitle("Редактирование занятия")
         self.setModal(True)
-        self.resize(520, 260)
+        self.resize(560, 280)
 
         layout = QVBoxLayout(self)
 
@@ -62,11 +62,12 @@ class EntryEditDialog(QDialog):
         layout.addLayout(form)
 
         self.slot_btn = QPushButton("Выбрать слот…")
+        self.subject_btn = QPushButton("Выбрать дисциплину…")
         self.teacher_btn = QPushButton("Выбрать преподавателя…")
         self.room_btn = QPushButton("Выбрать аудиторию…")
-        self.group_btn = QPushButton("Выбрать группу…")
 
         self.slot_value = QLabel("—")
+        self.subject_value = QLabel("—")
         self.teacher_value = QLabel("—")
         self.room_value = QLabel("—")
         self.group_value = QLabel("—")
@@ -74,6 +75,10 @@ class EntryEditDialog(QDialog):
         slot_row = QHBoxLayout()
         slot_row.addWidget(self.slot_value, 1)
         slot_row.addWidget(self.slot_btn)
+
+        subject_row = QHBoxLayout()
+        subject_row.addWidget(self.subject_value, 1)
+        subject_row.addWidget(self.subject_btn)
 
         teacher_row = QHBoxLayout()
         teacher_row.addWidget(self.teacher_value, 1)
@@ -83,14 +88,11 @@ class EntryEditDialog(QDialog):
         room_row.addWidget(self.room_value, 1)
         room_row.addWidget(self.room_btn)
 
-        group_row = QHBoxLayout()
-        group_row.addWidget(self.group_value, 1)
-        group_row.addWidget(self.group_btn)
-
         form.addRow("Слот:", self._wrap(slot_row))
+        form.addRow("Группа:", self.group_value)
+        form.addRow("Дисциплина:", self._wrap(subject_row))
         form.addRow("Преподаватель:", self._wrap(teacher_row))
         form.addRow("Аудитория:", self._wrap(room_row))
-        form.addRow("Группа:", self._wrap(group_row))
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
@@ -101,14 +103,14 @@ class EntryEditDialog(QDialog):
         layout.addLayout(buttons)
 
         self._new_slot_id: Optional[int] = None
+        self._new_curriculum_id: Optional[int] = None
         self._new_teacher_id: Optional[int] = None
         self._new_room_id: Optional[int] = None
-        self._new_group_id: Optional[int] = None
 
         self.slot_btn.clicked.connect(self._choose_slot)
+        self.subject_btn.clicked.connect(self._choose_subject)
         self.teacher_btn.clicked.connect(self._choose_teacher)
         self.room_btn.clicked.connect(self._choose_room)
-        self.group_btn.clicked.connect(self._choose_group)
         self.save_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
 
@@ -134,9 +136,81 @@ class EntryEditDialog(QDialog):
             f"{DAY_NAMES.get(int(self._entry.day_of_week), str(self._entry.day_of_week))}, "
             f"пара {int(self._entry.pair_number)}"
         )
+        self.subject_value.setText(f"{self._entry.subject_name} ({self._entry.part_type})")
         self.teacher_value.setText(self._entry.teacher_name)
         self.room_value.setText(self._entry.room_number)
         self.group_value.setText(self._entry.group_name)
+
+    def _selected_curriculum_context(self) -> tuple[int, int, str]:
+        curriculum_id = int(self._new_curriculum_id or getattr(self._entry, "curriculum_id", 0) or 0)
+        subject_id = int(getattr(self._entry, "subject_id", 0) or 0)
+        part_type = str(getattr(self._entry, "part_type", "") or "")
+
+        if self._new_curriculum_id is not None:
+            curriculum = self._get_curriculum_by_id(int(self._new_curriculum_id))
+            if curriculum is not None:
+                subject_id = int(getattr(curriculum, "subject_id", subject_id) or subject_id)
+                part_type = str(getattr(curriculum, "part_type", part_type) or part_type)
+
+        return curriculum_id, subject_id, part_type
+
+    def _get_curriculum_by_id(self, curriculum_id: int):
+        repo = getattr(self._vm, "_apply_manual_edit_uc", None)
+        schedule_repo = getattr(repo, "_schedule_repo", None)
+        if schedule_repo is None:
+            return None
+        getter = getattr(schedule_repo, "get_curriculum", None)
+        if getter is None:
+            return None
+        return getter(int(curriculum_id))
+
+    def _curriculum_choices_for_entry_group(self) -> list[object]:
+        repo = getattr(self._vm, "_apply_manual_edit_uc", None)
+        schedule_repo = getattr(repo, "_schedule_repo", None)
+        subjects_repo = getattr(self.parent(), "_subjects_repo", None)
+        if schedule_repo is None or subjects_repo is None or self._entry is None:
+            return []
+
+        calendar_id = None
+        if self._vm.current_variant_id is not None:
+            variant = schedule_repo.get_variant(int(self._vm.current_variant_id))
+            calendar_id = int(getattr(variant, "calendar_id", 0) or 0) if variant is not None else None
+
+        subject_names = {
+            int(getattr(s, "id_subject", 0) or 0): str(getattr(s, "subject_name", "") or "")
+            for s in subjects_repo.list_all()
+        }
+        current_group_id = int(getattr(self._entry, "group_id", 0) or 0)
+        rows: list[object] = []
+
+        with schedule_repo._session_factory() as conn:
+            conn.row_factory = lambda cursor, row: {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
+            params: list[int] = [current_group_id]
+            calendar_filter = ""
+            if calendar_id is not None and calendar_id > 0:
+                calendar_filter = "AND csp.calendar_id=?"
+                params.append(int(calendar_id))
+            query = f"""
+                SELECT DISTINCT ci.id_curriculum, ci.subject_id, ci.part_type, ci.required_room_type
+                FROM CurriculumItems ci
+                JOIN CurriculumSemesterPlan csp ON csp.curriculum_id = ci.id_curriculum
+                WHERE ci.group_id=? {calendar_filter}
+                ORDER BY ci.subject_id, ci.part_type, ci.id_curriculum
+            """
+            db_rows = conn.execute(query, tuple(params)).fetchall()
+
+        for row in db_rows:
+            subject_id = int(row["subject_id"])
+            rows.append(
+                SimpleNamespace(
+                    curriculum_id=int(row["id_curriculum"]),
+                    subject_id=subject_id,
+                    subject_name=subject_names.get(subject_id, f"ID={subject_id}"),
+                    part_type=str(row["part_type"]),
+                    required_room_type=str(row["required_room_type"]),
+                )
+            )
+        return rows
 
     def _choose_slot(self) -> None:
         variant = self._vm.current_variant
@@ -182,7 +256,17 @@ class EntryEditDialog(QDialog):
             QMessageBox.warning(self, "Нет данных", "Репозиторий преподавателей недоступен.")
             return
 
+        _curriculum_id, subject_id, part_type = self._selected_curriculum_context()
+        if subject_id <= 0 or not part_type:
+            QMessageBox.warning(self, "Нет дисциплины", "Сначала выберите дисциплину.")
+            return
+
         teachers = teachers_repo.list_all()
+        teacher_part_matrix = teachers_repo.get_teacher_part_matrix()
+        teachers = [
+            t for t in teachers
+            if teacher_part_matrix.get((int(t.id_teacher), int(subject_id), str(part_type)), False)
+        ]
         if not teachers:
             QMessageBox.warning(self, "Нет данных", "Список преподавателей пуст.")
             return
@@ -205,6 +289,41 @@ class EntryEditDialog(QDialog):
         if ok and value:
             self._new_teacher_id = mapping[value]
             self.teacher_value.setText(value)
+
+    def _choose_subject(self) -> None:
+        curricula = self._curriculum_choices_for_entry_group()
+        if not curricula:
+            QMessageBox.warning(self, "Нет данных", "Для группы не найдены дисциплины учебного плана.")
+            return
+
+        choices = []
+        mapping = {}
+        current_id = int(self._new_curriculum_id or getattr(self._entry, "curriculum_id", 0) or 0)
+        current_index = 0
+        for idx, item in enumerate(curricula):
+            text = (
+                f"{item.subject_name} ({item.part_type}) "
+                f"[curriculum_id={int(item.curriculum_id)}]"
+            )
+            choices.append(text)
+            mapping[text] = item
+            if int(item.curriculum_id) == current_id:
+                current_index = idx
+
+        value, ok = QInputDialog.getItem(
+            self,
+            "Выбор дисциплины",
+            "Дисциплина:",
+            choices,
+            current_index,
+            False,
+        )
+        if ok and value:
+            item = mapping[value]
+            self._new_curriculum_id = int(item.curriculum_id)
+            self.subject_value.setText(f"{item.subject_name} ({item.part_type})")
+            self._new_teacher_id = None
+            self.teacher_value.setText("—")
 
     def _choose_room(self) -> None:
         repo = getattr(self._vm, "_apply_manual_edit_uc", None)
@@ -240,43 +359,12 @@ class EntryEditDialog(QDialog):
             self._new_room_id = mapping[value]
             self.room_value.setText(value)
 
-    def _choose_group(self) -> None:
-        repo = getattr(self._vm, "_apply_manual_edit_uc", None)
-        groups_repo = getattr(repo, "_groups_repo", None)
-        if groups_repo is None:
-            QMessageBox.warning(self, "Нет данных", "Репозиторий групп недоступен.")
-            return
-
-        groups = groups_repo.list_all()
-        if not groups:
-            QMessageBox.warning(self, "Нет данных", "Список групп пуст.")
-            return
-
-        choices = []
-        mapping = {}
-        for g in groups:
-            text = f"{g.group_name} [курс {g.year or '—'}, {int(g.quantity)} чел.] [id={int(g.id_group)}]"
-            choices.append(text)
-            mapping[text] = int(g.id_group)
-
-        value, ok = QInputDialog.getItem(
-            self,
-            "Выбор группы",
-            "Группа:",
-            choices,
-            0,
-            False,
-        )
-        if ok and value:
-            self._new_group_id = mapping[value]
-            self.group_value.setText(value)
-
     def get_changes(self) -> dict:
         return {
             "new_slot_id": self._new_slot_id,
+            "new_curriculum_id": self._new_curriculum_id,
             "new_teacher_id": self._new_teacher_id,
             "new_room_id": self._new_room_id,
-            "new_group_id": self._new_group_id,
         }
 
 
@@ -1171,9 +1259,9 @@ class EditorPage(QWidget):
         updated = self.vm.apply_edit(
             schedule_entry_id=int(entry_id),
             new_slot_id=changes["new_slot_id"],
+            new_curriculum_id=changes["new_curriculum_id"],
             new_teacher_id=changes["new_teacher_id"],
             new_room_id=changes["new_room_id"],
-            new_group_id=changes["new_group_id"],
             comment="Редактирование из editor_page",
             edited_by="editor_page",
             lock_after_edit=True,

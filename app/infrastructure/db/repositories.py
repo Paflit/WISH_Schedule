@@ -51,6 +51,13 @@ def _optional_int(value) -> Optional[int]:
     return v
 
 
+def _positive_optional_int(value) -> Optional[int]:
+    v = _optional_int(value)
+    if v is None or v <= 0:
+        return None
+    return v
+
+
 def _bool_to_int(value: bool) -> int:
     return 1 if bool(value) else 0
 
@@ -1935,6 +1942,39 @@ class SqliteScheduleRepository:
                 ).fetchall()
         return [SimpleNamespace(**r) for r in rows]
 
+    def delete_variant(self, variant_id: int) -> None:
+        with self._session_factory() as conn:
+            conn.execute("DELETE FROM ScheduleVariants WHERE id_variant=?", (int(variant_id),))
+            conn.commit()
+
+    def _ensure_schedule_entry_fk_exists(
+        self,
+        conn,
+        *,
+        table: str,
+        column: str,
+        value: Optional[int],
+        nullable: bool = False,
+        entry_context: dict,
+    ) -> None:
+        if value is None:
+            if nullable:
+                return
+            raise ValueError(
+                "Некорректная ссылка ScheduleEntries: "
+                f"{column}=NULL, context={json.dumps(entry_context, ensure_ascii=False, default=str)}"
+            )
+        row = conn.execute(
+            f"SELECT 1 FROM {table} WHERE {column}=? LIMIT 1",
+            (int(value),),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                "Некорректная ссылка ScheduleEntries: "
+                f"{table}.{column}={value} не найден, "
+                f"context={json.dumps(entry_context, ensure_ascii=False, default=str)}"
+            )
+
     def save_solution_entries(self, variant_id: int, solution_entries: List[SolutionEntry]) -> None:
         with self._session_factory() as conn:
             for entry in solution_entries:
@@ -1958,7 +1998,65 @@ class SqliteScheduleRepository:
                     group_id = _positive_int(getattr(event, "group_id", 0), 0)
                     group_curriculum_pairs = [(group_id, curriculum_id)]
 
+                teacher_id = _positive_optional_int(getattr(entry, "teacher_id", None))
+                room_id = _positive_optional_int(getattr(entry, "room_id", None))
+
                 for group_id, curriculum_id in group_curriculum_pairs:
+                    group_id_value = int(group_id) if int(group_id) > 0 else None
+                    context = {
+                        "variant_id": int(variant_id),
+                        "event_id": int(entry.event_id),
+                        "slot_id": int(entry.slot_id),
+                        "group_id": group_id_value,
+                        "teacher_id": teacher_id,
+                        "curriculum_id": int(curriculum_id),
+                        "room_id": room_id,
+                    }
+                    self._ensure_schedule_entry_fk_exists(
+                        conn,
+                        table="ScheduleVariants",
+                        column="id_variant",
+                        value=int(variant_id),
+                        entry_context=context,
+                    )
+                    self._ensure_schedule_entry_fk_exists(
+                        conn,
+                        table="TimeSlots",
+                        column="id_slot",
+                        value=int(entry.slot_id),
+                        entry_context=context,
+                    )
+                    self._ensure_schedule_entry_fk_exists(
+                        conn,
+                        table="StudentGroups",
+                        column="id_group",
+                        value=group_id_value,
+                        nullable=True,
+                        entry_context=context,
+                    )
+                    self._ensure_schedule_entry_fk_exists(
+                        conn,
+                        table="Teachers",
+                        column="id_teacher",
+                        value=teacher_id,
+                        nullable=True,
+                        entry_context=context,
+                    )
+                    self._ensure_schedule_entry_fk_exists(
+                        conn,
+                        table="CurriculumItems",
+                        column="id_curriculum",
+                        value=int(curriculum_id),
+                        entry_context=context,
+                    )
+                    self._ensure_schedule_entry_fk_exists(
+                        conn,
+                        table="Classes",
+                        column="id_class",
+                        value=room_id,
+                        nullable=True,
+                        entry_context=context,
+                    )
                     conn.execute(
                         """
                         INSERT INTO ScheduleEntries(
@@ -1978,10 +2076,10 @@ class SqliteScheduleRepository:
                             int(variant_id),
                             int(entry.event_id),
                             int(entry.slot_id),
-                            int(group_id) if int(group_id) > 0 else None,
-                            int(entry.teacher_id) if entry.teacher_id is not None else None,
+                            group_id_value,
+                            teacher_id,
                             int(curriculum_id),
-                            int(entry.room_id) if entry.room_id is not None else None,
+                            room_id,
                             json.dumps({"event_id": int(entry.event_id)}, ensure_ascii=False),
                         ),
                     )

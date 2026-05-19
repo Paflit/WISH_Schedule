@@ -997,6 +997,7 @@ class GenerateScheduleUseCase:
                 objective_value=objective_value,
             )
 
+            variant_id = None
             try:
                 variant_id = self._schedule_repo.create_variant(
                     calendar_id=calendar_id,
@@ -1028,6 +1029,11 @@ class GenerateScheduleUseCase:
                 logger.info("Генерация варианта завершена успешно")
                 
             except Exception as exc:
+                if variant_id is not None and hasattr(self._schedule_repo, "delete_variant"):
+                    try:
+                        self._schedule_repo.delete_variant(int(variant_id))
+                    except Exception:
+                        pass
                 raise SolverError(
                     f"Ошибка при сохранении варианта расписания #{idx}: {exc}"
                 ) from exc
