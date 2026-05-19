@@ -362,7 +362,6 @@ class ApplyManualEditUseCase:
             return ApplyManualEditResult(before=before, after=after, changed=False)
 
         self._validate_conflicts(after)
-        self._validate_group_schedule_rules(before, after)
 
         self._schedule_repo.update_entry(after)
 
@@ -435,13 +434,6 @@ class ApplyManualEditUseCase:
 
         self._validate_basic_consistency(draft_entry, draft_entry)
         self._validate_conflicts(draft_entry)
-
-        variant_entries = list(self._schedule_repo.list_entries(int(command.variant_id)) or [])
-        affected_entries = variant_entries + [draft_entry]
-        by_group = [e for e in affected_entries if int(e.group_id) == int(command.group_id)]
-        if by_group:
-            reference = by_group[0]
-            self._validate_group_schedule_rules(reference, draft_entry)
 
         schedule_entry_id = self._schedule_repo.create_entry(draft_entry)
         if command.lock_after_edit:

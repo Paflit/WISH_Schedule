@@ -1436,7 +1436,13 @@ class CPSatScheduleSolver:
                     if tid <= 0:
                         continue
 
-                    if not teacher_availability.get((tid, sid), True):
+                    locked_teacher_slot = (
+                        lk is not None
+                        and lk.teacher_id is not None
+                        and int(lk.teacher_id) == int(tid)
+                        and (lk.slot_id is None or int(lk.slot_id) == int(sid))
+                    )
+                    if not locked_teacher_slot and not teacher_availability.get((tid, sid), True):
                         continue
 
                     if allow_missing_room:

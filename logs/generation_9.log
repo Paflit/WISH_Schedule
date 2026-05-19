@@ -1,9 +1,9 @@
-2026-04-06 19:49:20 - INFO - Начало сохранения варианта #1
-2026-04-06 19:49:20 - INFO - Variant ID: 9
-2026-04-06 19:49:20 - INFO - Variant name: 2025/2026_semester_2_variant_1
-2026-04-06 19:49:20 - INFO - Calendar ID: 1
-2026-04-06 19:49:20 - INFO - Objective score: 9177
-2026-04-06 19:49:20 - INFO - Solution entries count: 213
-2026-04-06 19:49:20 - INFO - Solution entries сохранены
-2026-04-06 19:49:20 - INFO - Variant DTO получен, entries: 213
-2026-04-06 19:49:20 - INFO - Генерация варианта завершена успешно
+2026-05-19 15:42:10 - INFO - Начало сохранения варианта #1
+2026-05-19 15:42:10 - INFO - Variant ID: 9
+2026-05-19 15:42:10 - INFO - Variant name: 2025/2026_semester_2_variant_6_test
+2026-05-19 15:42:10 - INFO - Calendar ID: 1
+2026-05-19 15:42:10 - INFO - Objective score: 158620
+2026-05-19 15:42:10 - INFO - Solution entries count: 373
+2026-05-19 15:42:10 - INFO - Solution entries сохранены
+2026-05-19 15:42:10 - INFO - Variant DTO получен, entries: 373
+2026-05-19 15:42:10 - INFO - Генерация варианта завершена успешно

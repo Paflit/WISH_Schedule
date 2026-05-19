@@ -377,7 +377,7 @@ class ScheduleCellFrame(QFrame):
         self._editable = bool(editable)
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setCursor(Qt.CursorShape.PointingHandCursor if self._editable else Qt.CursorShape.ArrowCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         if self._editable:
             self.setStyleSheet(
                 """
@@ -427,8 +427,6 @@ class ScheduleCellFrame(QFrame):
     def mousePressEvent(self, event):
         if callable(self._on_select):
             self._on_select(int(self.item.id_schedule))
-        if self._editable and callable(self._on_open):
-            self._on_open(int(self.item.id_schedule))
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -440,13 +438,14 @@ class ScheduleCellFrame(QFrame):
 
 
 class EmptyScheduleCellFrame(QFrame):
-    def __init__(self, *, on_open=None, editable: bool = False):
+    def __init__(self, *, on_open=None, on_select=None, editable: bool = False):
         super().__init__()
         self._on_open = on_open
+        self._on_select = on_select
         self._editable = bool(editable)
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setCursor(Qt.CursorShape.PointingHandCursor if self._editable else Qt.CursorShape.ArrowCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(
             """
             QFrame {
@@ -480,9 +479,14 @@ class EmptyScheduleCellFrame(QFrame):
         layout.addWidget(label)
 
     def mousePressEvent(self, event):
+        if callable(self._on_select):
+            self._on_select()
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
         if self._editable and callable(self._on_open):
             self._on_open()
-        super().mousePressEvent(event)
+        super().mouseDoubleClickEvent(event)
 
 
 class EditorPage(QWidget):
@@ -655,19 +659,20 @@ class EditorPage(QWidget):
         self.grid_layout.setSpacing(6)
         self.info_label = QLabel("Выберите вариант расписания.")
         self.info_label.setWordWrap(True)
-        self.info_label.hide()
 
         self.entries_list = QListWidget()
         self.entries_list.hide()
 
         self.selected_title = QLabel("Запись не выбрана.")
         self.selected_title.setWordWrap(True)
-        self.selected_title.hide()
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         self.status_label.hide()
 
+        root.addWidget(self.selected_title)
+        root.addWidget(self.info_label)
+        root.addWidget(self.status_label)
         root.addWidget(self.grid_container, 1)
         self.stack.addWidget(page)
 
@@ -855,14 +860,27 @@ class EditorPage(QWidget):
             f"<b>{entry.subject_name}</b> ({entry.part_type})<br>"
             f"{entry.group_name} | {entry.teacher_name} | {entry.room_number}<br>"
             f"Слот: {DAY_NAMES.get(int(entry.day_of_week), str(entry.day_of_week))}, "
-            f"пара {int(entry.pair_number)} | id_schedule={int(entry.id_schedule)}"
+            f"пара {int(entry.pair_number)} | неделя {int(entry.week_type)}"
         )
+        self.info_label.setText("")
 
         for i in range(self.entries_list.count()):
             item = self.entries_list.item(i)
             if int(item.data(Qt.ItemDataRole.UserRole)) == int(entry.id_schedule):
                 self.entries_list.setCurrentItem(item)
                 break
+
+    def _show_empty_cell_details(self, slot_id: Optional[int], day: int, pair: int) -> None:
+        self._current_entry_id = None
+        week_type = self._selected_week_number()
+        selected_entity = self._selected_entity_key()
+        entity_label = self._entity_label(selected_entity) if selected_entity is not None else "—"
+        self.selected_title.setText(
+            f"<b>Пустая ячейка</b><br>"
+            f"{entity_label}<br>"
+            f"Слот: {DAY_NAMES.get(int(day), str(day))}, пара {int(pair)} | неделя {int(week_type)}"
+        )
+        self.info_label.setText("Двойной клик в режиме редактирования добавляет занятие.")
 
     def _on_edit_applied(self, entry) -> None:
         self._current_entry_id = int(entry.id_schedule)
@@ -1058,6 +1076,7 @@ class EditorPage(QWidget):
                     slot_id = self._slot_id_for_cell(selected_week, day, pair)
                     empty = EmptyScheduleCellFrame(
                         editable=self._calendar_edit_mode and mode == self.MODE_GROUP and slot_id is not None,
+                        on_select=lambda sid=slot_id, d=day, p=pair: self._show_empty_cell_details(sid, d, p),
                         on_open=(
                             lambda sid=slot_id, d=day, p=pair: self._open_empty_cell_editor(sid, d, p)
                             if slot_id is not None else None

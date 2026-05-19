@@ -339,6 +339,46 @@ class GenerateScheduleUseCase:
                     created_room_types.add(required_room_type)
                     created_rooms += 1
 
+        for item in list(diagnostics.get("local_resource_issues", []) or []):
+            subject_id = self._positive_int(item.get("subject_id", 0), 0)
+            part_type = str(item.get("part_type", "") or "practice")
+            candidate_rooms = self._positive_int(item.get("candidate_rooms", 0), 0)
+            if subject_id <= 0 or candidate_rooms > 0:
+                continue
+
+            curriculum_item = next(
+                (
+                    item_obj
+                    for item_obj in self._curriculum_repo.get_curriculum_items_for_plans(
+                        self._curriculum_repo.get_semester_plans(int(calendar_id))
+                    ).values()
+                    if self._positive_int(getattr(item_obj, "subject_id", 0), 0) == subject_id
+                    and str(getattr(item_obj, "part_type", "") or "") == part_type
+                ),
+                None,
+            )
+            required_room_type = str(getattr(curriculum_item, "required_room_type", "") or "").strip().lower()
+            if not required_room_type:
+                required_room_type = "classroom"
+                if part_type == "lecture":
+                    required_room_type = "lecture"
+                elif part_type == "computer_practice":
+                    required_room_type = "computer"
+                elif part_type == "lab":
+                    required_room_type = "lab"
+
+            if required_room_type in created_room_types:
+                continue
+            self._rooms_repo.create(
+                room_number=self._unique_room_name(required_room_type),
+                room_type=required_room_type,
+                room_types=[required_room_type],
+                capacity=35,
+                building="Автозаглушка",
+            )
+            created_room_types.add(required_room_type)
+            created_rooms += 1
+
         return created_teachers, created_rooms
 
     def _create_capacity_teacher_placeholders_from_diagnostics(
@@ -884,6 +924,23 @@ class GenerateScheduleUseCase:
                     progress_cb,
                     "auto_capacity_placeholders_added",
                     created_teachers=created_capacity_teachers,
+                )
+                return self._execute_internal(
+                    command,
+                    progress_cb,
+                    auto_retry_left=auto_retry_left - 1,
+                )
+
+            created_teachers, created_rooms = self._create_event_placeholders_from_diagnostics(
+                generation_diagnostics,
+                calendar_id=calendar_id,
+            )
+            if created_teachers or created_rooms:
+                self._emit(
+                    progress_cb,
+                    "auto_placeholders_added",
+                    created_teachers=created_teachers,
+                    created_rooms=created_rooms,
                 )
                 return self._execute_internal(
                     command,
