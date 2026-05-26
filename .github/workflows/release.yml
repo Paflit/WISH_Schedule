@@ -3,7 +3,7 @@ name: Build & Release (Windows)
 on:
   push:
     tags:
-      - "v1.1"
+      - "v*"
 
 permissions:
   contents: write
@@ -28,7 +28,7 @@ jobs:
 
       - name: Build with PyInstaller (spec)
         run: |
-          pyinstaller --noconfirm --clean WISH_Schedule.spec
+          python -m PyInstaller --noconfirm --clean WISH_Schedule.spec
 
       - name: Prepare portable folder
         run: |
@@ -47,6 +47,6 @@ jobs:
       - name: Create GitHub Release & Upload Asset
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1
-          name: WISH Schedule v1.1
+          tag_name: ${{ github.ref_name }}
+          name: WISH Schedule ${{ github.ref_name }}
           files: WISH_Schedule-win64.zip

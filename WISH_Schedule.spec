@@ -1,31 +1,34 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 block_cipher = None
 
 datas = [
     ('Icon.ico', '.'),
+    ('app/infrastructure/db/schema.sql', 'app/infrastructure/db'),
 ]
-datas += collect_data_files('ortools')
+binaries = []
 
 hiddenimports = []
 hiddenimports += collect_submodules('app')
-hiddenimports += collect_submodules('ortools')
+
+ortools_datas, ortools_binaries, ortools_hiddenimports = collect_all('ortools')
+datas += ortools_datas
+binaries += ortools_binaries
+hiddenimports += ortools_hiddenimports
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
@@ -40,7 +43,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -55,7 +58,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='WISH_Schedule',
 )
